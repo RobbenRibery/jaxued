@@ -1,3 +1,4 @@
+print("##### Starts Importing")
 import json
 import os
 import time
@@ -12,15 +13,15 @@ import jax.numpy as jnp
 import numpy as np
 import optax
 import orbax.checkpoint as ocp
-from craftax.constants import BLOCK_PIXEL_SIZE_IMG
-from craftax.envs.craftax_pixels_env import CraftaxPixelsEnv
-from craftax.envs.craftax_symbolic_env import CraftaxSymbolicEnv
-from craftax.renderer import render_craftax_pixels as render_pixels
-from craftax_classic.renderer import render_craftax_pixels as render_pixels_classic
-from craftax.world_gen.world_gen import generate_world as generate_world_craftax
-from craftax_classic.world_gen import generate_world as generate_world_classic
-from craftax_classic.envs.craftax_symbolic_env import CraftaxClassicSymbolicEnv
-from craftax_classic.envs.craftax_pixels_env import CraftaxClassicPixelsEnv
+from craftax.craftax.constants import BLOCK_PIXEL_SIZE_IMG
+from craftax.craftax.envs.craftax_pixels_env import CraftaxPixelsEnv
+from craftax.craftax.envs.craftax_symbolic_env import CraftaxSymbolicEnv
+from craftax.craftax.renderer import render_craftax_pixels as render_pixels
+from craftax.craftax_classic.renderer import render_craftax_pixels as render_pixels_classic
+from craftax.craftax.world_gen.world_gen import generate_world as generate_world_craftax
+from craftax.craftax_classic.world_gen import generate_world as generate_world_classic
+from craftax.craftax_classic.envs.craftax_symbolic_env import CraftaxClassicSymbolicEnv
+from craftax.craftax_classic.envs.craftax_pixels_env import CraftaxClassicPixelsEnv
 from flax import core, struct
 from flax.linen.initializers import constant, orthogonal
 from flax.training.train_state import TrainState as BaseTrainState
@@ -41,6 +42,7 @@ from examples.craftax.mutators import (make_mutator_craftax_mutate_angles,
                        make_mutator_craftax_swap,
                        make_mutator_craftax_swap_restricted)
 
+print('####Impors Completed')
 LAYER_WIDTH = 512
 class UpdateState(IntEnum):
     DR = 0
