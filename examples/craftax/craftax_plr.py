@@ -611,7 +611,11 @@ def main(config=None, project="JAXUED_TEST"):
     else:
         tags.append("PLR")
     run = wandb.init(
-        config=config, project=project, group=config["run_name"], tags=tags
+        config=config, 
+        project=project, 
+        group=config["group_name"], 
+        tags=tags,
+        name= config["run_name"]
     )
     config = wandb.config
 
@@ -765,7 +769,7 @@ def main(config=None, project="JAXUED_TEST"):
             DEFAULT_STATICS, only_middle=True, is_craftax_classic=is_classic
         )
     elif config["accel_mutation"] == "claude_35":
-        mutate_level = make_mutator_craftax_claude_35
+        mutate_level = make_mutator_craftax_claude_35()
     else:
         raise ValueError(f"Unknown mutation type: {config['accel_mutation']}")
 
@@ -1284,6 +1288,7 @@ if __name__ == "__main__":
 
     parser = argparse.ArgumentParser()
     parser.add_argument("--project", type=str, default="JAXUED_TEST")
+    parser.add_argument("--group_name", type=str, default=None)
     parser.add_argument("--run_name", type=str, default=None)
     parser.add_argument("--seed", type=int, default=0)
 
@@ -1355,7 +1360,7 @@ if __name__ == "__main__":
         "--accel_mutation",
         type=str,
         default="swap",
-        choices=["swap", "swap_restricted", "noise"],
+        choices=["swap", "swap_restricted", "noise", "claude_35"],
     )
 
     # === Eval CONFIG ===
