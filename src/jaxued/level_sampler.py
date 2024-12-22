@@ -252,7 +252,11 @@ class LevelSampler:
             "scores": sampler["scores"].at[idx].set(score),
         }
         if level_extra is not None:
-            new_sampler["levels_extra"] = jax.tree_map(lambda x, y: x.at[idx].set(y), new_sampler["levels_extra"], level_extra)
+            new_sampler["levels_extra"] = jax.tree_map(
+                lambda x, y: x.at[idx].set(y), 
+                new_sampler["levels_extra"], 
+                level_extra
+            )
         return new_sampler
     
     def update_batch(self, sampler: Sampler, level_inds: chex.Array, scores: chex.Array, level_extras: dict=None) -> Sampler:

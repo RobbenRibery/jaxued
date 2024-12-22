@@ -515,7 +515,7 @@ class ActorCritic(nn.Module):
 
 # region checkpointing
 def setup_checkpointing(
-    config: dict, train_state: TrainState, env: UnderspecifiedEnv, env_params: EnvParams
+    config: dict
 ) -> ocp.CheckpointManager:
     """This takes in the train state and config, and returns an orbax checkpoint manager.
         It also saves the config in `checkpoints/run_name/seed/config.json`
@@ -552,9 +552,11 @@ def setup_checkpointing(
 
 
 def train_state_to_log_dict(
-    train_state: TrainState, level_sampler: LevelSampler
+    train_state: TrainState, 
+    level_sampler: LevelSampler
 ) -> dict:
-    """To prevent the entire (large) train_state to be copied to the CPU when doing logging, this function returns all of the important information in a dictionary format.
+    """To prevent the entire (large) train_state to be copied to the CPU when doing logging,
+        this function returns all of the important information in a dictionary format.
 
         Anything in the `log` key will be logged to wandb.
 
@@ -586,14 +588,14 @@ def train_state_to_log_dict(
     }
 
 
-def compute_score(
+def compute_ued_score(
     config: dict,
     dones: chex.Array,
     values: chex.Array,
     max_returns: chex.Array,
     advantages: chex.Array,
 ) -> chex.Array:
-    # Computes the score for each level
+    # Computes the ued score for each level
     if config["score_function"] == "MaxMC":
         return max_mc(dones, values, max_returns)
     elif config["score_function"] == "pvl":
@@ -606,10 +608,12 @@ def main(config=None, project="JAXUED_TEST"):
     tags = []
     if not config["exploratory_grad_updates"]:
         tags.append("robust")
+
     if config["use_accel"]:
         tags.append("ACCEL")
     else:
         tags.append("PLR")
+        
     run = wandb.init(
         config=config, 
         project=project, 
@@ -883,7 +887,7 @@ def main(config=None, project="JAXUED_TEST"):
                 update_grad=config["exploratory_grad_updates"],
             )
             max_returns = compute_max_returns(dones, rewards)
-            scores = compute_score(config, dones, values, max_returns, advantages)
+            scores = compute_ued_score(config, dones, values, max_returns, advantages)
             sampler, _ = level_sampler.insert_batch(
                 sampler, new_levels, scores, {"max_return": max_returns}
             )
@@ -958,7 +962,7 @@ def main(config=None, project="JAXUED_TEST"):
                 level_sampler.get_levels_extra(sampler, level_inds)["max_return"],
                 compute_max_returns(dones, rewards),
             )
-            scores = compute_score(config, dones, values, max_returns, advantages)
+            scores = compute_ued_score(config, dones, values, max_returns, advantages)
             sampler = level_sampler.update_batch(
                 sampler, level_inds, scores, {"max_return": max_returns}
             )
@@ -1143,7 +1147,8 @@ def main(config=None, project="JAXUED_TEST"):
         # Eval
         rng, rng_eval = jax.random.split(rng)
         states, cum_rewards, episode_lengths = jax.vmap(eval, (0, None))(
-            jax.random.split(rng_eval, config["eval_num_attempts"]), train_state
+            jax.random.split(rng_eval, config["eval_num_attempts"]), 
+            train_state
         )
 
         # Collect Metrics
@@ -1151,7 +1156,8 @@ def main(config=None, project="JAXUED_TEST"):
 
         # just grab the first run
         states, episode_lengths = jax.tree_map(
-            lambda x: x[0], (states, episode_lengths)
+            lambda x: x[0], 
+            (states, episode_lengths)
         )  # (num_steps, num_eval_levels, ...), (num_eval_levels,)
         # And one attempt
         states = jax.tree_map(lambda x: x[:, :1], states)
@@ -1192,7 +1198,8 @@ def main(config=None, project="JAXUED_TEST"):
         )
 
         highest_scoring_level = level_sampler.get_levels(
-            train_state.sampler, train_state.sampler["scores"].argmax()
+            train_state.sampler, 
+            train_state.sampler["scores"].argmax()
         )
         highest_weighted_level = level_sampler.get_levels(
             train_state.sampler,
