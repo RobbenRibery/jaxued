@@ -48,7 +48,8 @@ from examples.craftax.mutators import (
     make_mutator_craftax_mutate_angles,
     make_mutator_craftax_swap,
     make_mutator_craftax_swap_restricted,
-    make_mutator_craftax_claude_35,
+    make_mutator_craftax_claude_35_hard,
+    make_mutator_craftax_claude_35_easy_hard,
 )
 
 print("####Impors Completed")
@@ -655,6 +656,9 @@ def main(config=None, project="JAXUED_TEST"):
 
         # evaluation performance
         returns = stats["eval_returns"]
+        log_dict.update({
+            "train/achievements": stats["train/achievements"]
+        })
         log_dict.update({"eval/mean_returns": returns.mean()})
         log_dict.update({"eval/mean_ep_lengths": stats["eval_ep_lengths"].mean()})
 
@@ -772,8 +776,10 @@ def main(config=None, project="JAXUED_TEST"):
         mutate_level = make_mutator_craftax_swap(
             DEFAULT_STATICS, only_middle=True, is_craftax_classic=is_classic
         )
-    elif config["accel_mutation"] == "claude_35":
-        mutate_level = make_mutator_craftax_claude_35()
+    elif config["accel_mutation"] == "claude_35_hard":
+        mutate_level = make_mutator_craftax_claude_35_hard()
+    elif config["accel_mutation"] == "claude_35_easy_hard":
+        mutate_level = make_mutator_craftax_claude_35_easy_hard()
     else:
         raise ValueError(f"Unknown mutation type: {config['accel_mutation']}")
 
@@ -814,7 +820,7 @@ def main(config=None, project="JAXUED_TEST"):
         network_params = network.init(rng, obs)
         tx = optax.chain(
             optax.clip_by_global_norm(config["max_grad_norm"]),
-            optax.adam(learning_rate=linear_schedule, eps=1e-5),
+            optax.adam(learning_rate=config["lr"], eps=1e-5),
         )
         pholder_level = sample_random_level(jax.random.PRNGKey(0))
         sampler = level_sampler.initialize(pholder_level, {"max_return": -jnp.inf})
@@ -893,7 +899,7 @@ def main(config=None, project="JAXUED_TEST"):
             )
             metrics = {
                 "losses": jax.tree_map(lambda x: x.mean(), losses),
-                "achievements": (info["achievements"] * dones[..., None])
+                "train/achievements": (info["achievements"] * dones[..., None])
                 .sum(axis=0)
                 .sum(axis=0)
                 / dones.sum(),
@@ -969,7 +975,7 @@ def main(config=None, project="JAXUED_TEST"):
 
             metrics = {
                 "losses": jax.tree_map(lambda x: x.mean(), losses),
-                "achievements": (info["achievements"] * dones[..., None])
+                "train/achievements": (info["achievements"] * dones[..., None])
                 .sum(axis=0)
                 .sum(axis=0)
                 / dones.sum(),
@@ -1046,14 +1052,14 @@ def main(config=None, project="JAXUED_TEST"):
             )
 
             max_returns = compute_max_returns(dones, rewards)
-            scores = compute_score(config, dones, values, max_returns, advantages)
+            scores = compute_ued_score(config, dones, values, max_returns, advantages)
             sampler, _ = level_sampler.insert_batch(
                 sampler, child_levels, scores, {"max_return": max_returns}
             )
 
             metrics = {
                 "losses": jax.tree_map(lambda x: x.mean(), losses),
-                "achievements": (info["achievements"] * dones[..., None])
+                "train/achievements": (info["achievements"] * dones[..., None])
                 .sum(axis=0)
                 .sum(axis=0)
                 / dones.sum(),
@@ -1272,7 +1278,7 @@ def main(config=None, project="JAXUED_TEST"):
 
     # And run the train_eval_sep function for the specified number of updates
     if config["checkpoint_save_interval"] > 0:
-        checkpoint_manager = setup_checkpointing(config, train_state, env, env_params)
+        checkpoint_manager = setup_checkpointing(config)
     for eval_step in range(config["num_updates"] // config["eval_freq"]):
         start_time = time.time()
         runner_state, metrics = train_and_eval_step(runner_state, None)
@@ -1367,7 +1373,13 @@ if __name__ == "__main__":
         "--accel_mutation",
         type=str,
         default="swap",
-        choices=["swap", "swap_restricted", "noise", "claude_35"],
+        choices=[
+            "swap", 
+            "swap_restricted", 
+            "noise",
+            "claude_35_easy_hard",
+            "claude_35_hard",
+        ],
     )
 
     # === Eval CONFIG ===

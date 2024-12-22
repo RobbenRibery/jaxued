@@ -350,8 +350,8 @@ def make_mutator_craftax_mutate_angles(
 
 
 
-def make_mutator_craftax_claude_35(): 
-    from .claude_35.moed import (
+def make_mutator_craftax_claude_35_hard(): 
+    from .claude_35.moed_hard import (
         editor_basic_resources,
         editor_environmental_hazards,
         editor_light_levels,
@@ -365,6 +365,29 @@ def make_mutator_craftax_claude_35():
         editor_light_levels,
         editor_mob_stats,
         editor_spawn_rates,
+    ]
+
+    return partial(seq_edits, mutators_collection=mutators_collection)
+
+def make_mutator_craftax_claude_35_easy_hard(): 
+    from .claude_35.moed_easy_hard import (
+        editor_abundant_resources,
+        editor_peaceful_mobs,
+        editor_lenient_survival,   
+        editor_scarce_resources,
+        editor_aggressive_mobs,
+        editor_harsh_survival,
+        editor_extreme_environment
+    )
+
+    mutators_collection = [
+        editor_abundant_resources,
+        editor_peaceful_mobs,
+        editor_lenient_survival,   
+        editor_scarce_resources,
+        editor_aggressive_mobs,
+        editor_harsh_survival,
+        editor_extreme_environment
     ]
 
     return partial(seq_edits, mutators_collection=mutators_collection)

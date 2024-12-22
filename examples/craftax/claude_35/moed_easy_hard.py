@@ -3,15 +3,15 @@ import jax
 import jax.numpy as jnp
 import chex
 from functools import partial
-from moed.envs.craftax.craftax_state import EnvState
-from moed.envs.craftax.constants import *
+from craftax.craftax.craftax_state import EnvState
+from craftax.craftax.constants import *
 
 # utility functions
 def modify_mob_stats(mobs, health_mult, cooldown_mult):
     """Helper to modify mob statistics"""
     return mobs.replace(
-        health=mobs.health * health_mult,
-        attack_cooldown=mobs.attack_cooldown * cooldown_mult
+        health= mobs.health * health_mult,
+        attack_cooldown= (mobs.attack_cooldown * cooldown_mult).astype(jnp.int32)
     )
 
 # Mixture of Editors (Easy to Hard)
