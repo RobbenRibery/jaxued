@@ -34,7 +34,8 @@ dependencies = [
     "wandb",
     "pillow",
     "imageio",
-    "moviepy"
+    "moviepy",
+    "craftax",
 ]
 
 [project.urls]

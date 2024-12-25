@@ -1,4 +1,3 @@
-print("##### Starts Importing")
 import json
 import os
 import time
@@ -35,6 +34,7 @@ from jaxued.environments.underspecified_env import (
     Observation,
     UnderspecifiedEnv,
 )
+from jaxued.linen import ResetRNN
 from jaxued.level_sampler import LevelSampler
 from jaxued.utils import compute_max_returns, max_mc, positive_value_loss
 from jaxued.wrappers import AutoReplayWrapper
@@ -52,9 +52,8 @@ from examples.craftax.mutators import (
     make_mutator_craftax_claude_35_easy_hard,
 )
 
-print("####Impors Completed")
 LAYER_WIDTH = 512
-
+RECURRENT_WIDTH = 512
 
 class UpdateState(IntEnum):
     DR = 0
@@ -113,19 +112,33 @@ def compute_gae(
     return advantages, advantages + values
 
 
-def sample_trajectories(
+def sample_trajectories_rnn(
     rng: chex.PRNGKey,
     env: UnderspecifiedEnv,
     env_params: EnvParams,
     train_state: TrainState,
+    init_hstate: chex.ArrayTree,
     init_obs: Observation,
     init_env_state: EnvState,
     num_envs: int,
     max_episode_length: int,
 ) -> Tuple[
-    Tuple[chex.PRNGKey, TrainState, Observation, EnvState, chex.Array],
     Tuple[
-        Observation, chex.Array, chex.Array, chex.Array, chex.Array, chex.Array, dict
+        chex.PRNGKey, 
+        TrainState, 
+        chex.ArrayTree, 
+        Observation, 
+        EnvState, 
+        chex.Array
+    ],
+    Tuple[
+        Observation, 
+        chex.Array, 
+        chex.Array, 
+        chex.Array, 
+        chex.Array, 
+        chex.Array, 
+        dict
     ],
 ]:
     """This samples trajectories from the environment using the agent specified by the `train_state`.
@@ -136,6 +149,7 @@ def sample_trajectories(
         env (UnderspecifiedEnv):
         env_params (EnvParams):
         train_state (TrainState): Singleton
+        init_hstate (chex.ArrayTree): This is the init RNN hidden state, has to have shape (NUM_ENVS, ...)
         init_obs (Observation): The initial observation, shape (NUM_ENVS, ...)
         init_env_state (EnvState): The initial env state (NUM_ENVS, ...)
         num_envs (int): The number of envs that are vmapped over.
@@ -146,51 +160,57 @@ def sample_trajectories(
     """
 
     def sample_step(carry, _):
-        rng, train_state, obs, env_state = carry
+        rng, train_state, hstate, obs, env_state, last_done = carry
         rng, rng_action, rng_step = jax.random.split(rng, 3)
 
-        pi, value = train_state.apply_fn(train_state.params, obs)
+        x = jax.tree_util.tree_map(lambda x: x[None, ...], (obs, last_done))
+        hstate, pi, value = train_state.apply_fn(train_state.params, x, hstate)
         action = pi.sample(seed=rng_action)
         log_prob = pi.log_prob(action)
+        value, action, log_prob = (
+            value.squeeze(0),
+            action.squeeze(0),
+            log_prob.squeeze(0),
+        )
 
         next_obs, env_state, reward, done, info = jax.vmap(
             env.step, in_axes=(0, 0, 0, None)
         )(jax.random.split(rng_step, num_envs), env_state, action, env_params)
 
-        carry = (rng, train_state, next_obs, env_state)
+        carry = (rng, train_state, hstate, next_obs, env_state, done)
         return carry, (obs, action, reward, done, log_prob, value, info)
 
-    (rng, train_state, last_obs, last_state), (
-        obs,
-        action,
-        reward,
-        done,
-        log_prob,
-        value,
-        info,
-    ) = jax.lax.scan(
+    (rng, train_state, hstate, last_obs, last_env_state, last_done), traj = jax.lax.scan(
         sample_step,
-        (rng, train_state, init_obs, init_env_state),
+        (
+            rng, 
+            train_state, 
+            init_hstate,
+            init_obs, 
+            init_env_state,
+            jnp.zeros(num_envs, dtype=bool),
+        ),
         None,
         length=max_episode_length,
     )
 
-    _, last_value = train_state.apply_fn(train_state.params, last_obs)
+    x = jax.tree_util.tree_map(lambda x: x[None, ...], (last_obs, last_done))
+    _, _, last_value = train_state.apply_fn(train_state.params, x, hstate)
 
-    return (rng, train_state, last_obs, last_state, last_value), (
-        obs,
-        action,
-        reward,
-        done,
-        log_prob,
-        value,
-        info,
-    )
+    return (
+        rng, 
+        train_state, 
+        hstate, 
+        last_obs, 
+        last_env_state, 
+        last_value.squeeze(0),
+    ), traj
 
 
-def update_actor_critic(
+def update_actor_critic_rnn(
     rng: chex.PRNGKey,
     train_state: TrainState,
+    init_hstate: chex.ArrayTree,
     batch: chex.ArrayTree,
     num_envs: int,
     n_steps: int,
@@ -219,13 +239,27 @@ def update_actor_critic(
     Returns:
         Tuple[Tuple[chex.PRNGKey, TrainState], chex.ArrayTree]: It returns a new rng, the updated train_state, and the losses. The losses have structure (loss, (l_vf, l_clip, entropy))
     """
+    obs, actions, dones, log_probs, values, targets, advantages = batch
+    last_dones = jnp.roll(dones, 1, axis=0).at[0].set(False)
+    batch = obs, actions, last_dones, log_probs, values, targets, advantages
 
     def update_epoch(carry, _):
         def update_minibatch(train_state, minibatch):
-            obs, actions, log_probs, values, targets, advantages = minibatch
+            (
+                init_hstate, 
+                obs, 
+                actions, 
+                last_dones,
+                log_probs, 
+                values, 
+                targets, 
+                advantages 
+            ) = minibatch
 
             def loss_fn(params):
-                pi, values_pred = train_state.apply_fn(params, obs)
+                _, pi, values_pred = train_state.apply_fn(
+                    params, (obs, last_dones), init_hstate,
+                )
                 log_probs_pred = pi.log_prob(actions)
                 entropy = pi.entropy().mean()
 
@@ -249,7 +283,6 @@ def update_actor_critic(
                 )
 
                 loss = l_clip + critic_coeff * l_vf - entropy_coeff * entropy
-
                 return loss, (l_vf, l_clip, entropy)
 
             grad_fn = jax.value_and_grad(loss_fn, has_aux=True)
@@ -259,7 +292,7 @@ def update_actor_critic(
 
             grad_norm = jnp.linalg.norm(
                 jnp.concatenate(
-                    jax.tree_map(
+                    jax.tree_util.tree_map(
                         lambda x: x.flatten(), jax.tree_util.tree_flatten(grads)[0]
                     )
                 )
@@ -268,18 +301,28 @@ def update_actor_critic(
 
         rng, train_state = carry
         rng, rng_perm = jax.random.split(rng)
-        minibatches = jax.tree_map(
-            lambda x: jnp.take(
-                x.reshape((-1, *x.shape[2:])),
-                jax.random.permutation(rng_perm, num_envs * n_steps),
-                axis=0,
-            ).reshape((n_minibatch, -1, *x.shape[2:])),
-            batch,
+
+        permutation = jax.random.permutation(rng_perm, num_envs)
+        minibatches = (
+            jax.tree_util.tree_map(
+                lambda x: jnp.take(x, permutation, axis=0).reshape(
+                    n_minibatch, -1, *x.shape[1:]
+                ),
+                init_hstate,
+            ),
+            *jax.tree_util.tree_map(
+                lambda x: jnp.take(x, permutation, axis=1)
+                .reshape(x.shape[0], n_minibatch, -1, *x.shape[2:])
+                .swapaxes(0, 1),
+                batch,
+            ),
         )
-        train_state, (losses, grads) = jax.lax.scan(
-            update_minibatch, train_state, minibatches
+        train_state, (losses, grad_norms) = jax.lax.scan(
+            update_minibatch, 
+            train_state, 
+            minibatches
         )
-        return (rng, train_state), (losses, grads)
+        return (rng, train_state), (losses, grad_norms)
 
     return jax.lax.scan(update_epoch, (rng, train_state), None, n_epochs)
 
@@ -290,6 +333,7 @@ def sample_trajectories_and_learn(
     config: dict,
     rng: chex.PRNGKey,
     train_state: TrainState,
+    init_hstate: chex.ArrayTree,
     init_obs: Observation,
     init_env_state: EnvState,
     update_grad: bool = True,
@@ -335,15 +379,17 @@ def sample_trajectories_and_learn(
     """
 
     def single_step(carry, _):
-        rng, train_state, init_obs, init_env_state = carry
+        rng, train_state, init_hstate, init_obs, init_env_state = carry
+        
         (
-            (rng, train_state, last_obs, last_env_state, last_value),
-            (obs, actions, rewards, dones, log_probs, values, info),
-        ) = sample_trajectories(
+            (rng, train_state, h_state, last_obs, last_env_state, last_value),
+            (obs, actions, rewards, dones, log_probs, values, infos),
+        ) = sample_trajectories_rnn(
             rng,
             env,
             env_params,
             train_state,
+            init_hstate,
             init_obs,
             init_env_state,
             config["num_train_envs"],
@@ -354,10 +400,11 @@ def sample_trajectories_and_learn(
         )
 
         # Update the policy using trajectories collected from replay levels
-        (rng, train_state), (losses, grads) = update_actor_critic(
+        (rng, train_state), (losses, grad_norms) = update_actor_critic_rnn(
             rng,
             train_state,
-            (obs, actions, log_probs, values, targets, advantages),
+            init_hstate,
+            (obs, actions, dones, log_probs, values, targets, advantages),
             config["num_train_envs"],
             config["num_steps"],
             config["num_minibatches"],
@@ -367,7 +414,7 @@ def sample_trajectories_and_learn(
             config["critic_coeff"],
             update_grad=update_grad,
         )
-        new_carry = (rng, train_state, last_obs, last_env_state)
+        new_carry = (rng, train_state, h_state, last_obs, last_env_state)
         return new_carry, (
             obs,
             actions,
@@ -375,28 +422,29 @@ def sample_trajectories_and_learn(
             dones,
             log_probs,
             values,
-            info,
+            infos,
             advantages,
             targets,
             losses,
-            grads,
+            grad_norms,
         )
 
-    carry = (rng, train_state, init_obs, init_env_state)
+    carry = (rng, train_state, init_hstate, init_obs, init_env_state)
     new_carry, all_rollouts = jax.lax.scan(
         single_step, carry, None, length=config["outer_rollout_steps"]
     )
 
-    all_rollouts = jax.tree_map(lambda x: jnp.concatenate(x, axis=0), all_rollouts)
+    all_rollouts = jax.tree_util.tree_map(lambda x: jnp.concatenate(x, axis=0), all_rollouts)
     return new_carry, all_rollouts
 
 
-def evaluate(
+def evaluate_rnn(
     rng: chex.PRNGKey,
     env: UnderspecifiedEnv,
     env_params: EnvParams,
     train_state: TrainState,
     init_obs: Observation,
+    init_hstate: chex.ArrayTree,
     init_env_state: EnvState,
     max_episode_length: int,
     keep_states=True,
@@ -416,14 +464,20 @@ def evaluate(
     Returns:
         Tuple[chex.Array, chex.Array, chex.Array]: (States, rewards, episode lengths) ((NUM_STEPS, NUM_LEVELS), (NUM_STEPS, NUM_LEVELS), (NUM_LEVELS,)
     """
+    #print(f"#### EVAL init_obs: {init_obs.shape}")
     num_levels = jax.tree_util.tree_flatten(init_obs)[0][0].shape[0]
+    #print(f"num levels {num_levels}")
 
     def step(carry, _):
-        rng, obs, state, done, mask, episode_length = carry
+        rng, hstate, obs, state, done, mask, episode_length = carry
         rng, rng_action, rng_step = jax.random.split(rng, 3)
 
-        pi, _ = train_state.apply_fn(train_state.params, obs)
-        action = pi.sample(seed=rng_action)
+        #print(f"#### {obs.shape}")
+        #print(f"#### {done.shape}")
+
+        x = jax.tree_util.tree_map(lambda x: x[None, ...], (obs, done))
+        hstate, pi, _ = train_state.apply_fn(train_state.params, x, hstate)
+        action = pi.sample(seed=rng_action).squeeze(0)
 
         obs, next_state, reward, done, _ = jax.vmap(env.step, in_axes=(0, 0, 0, None))(
             jax.random.split(rng_step, num_levels), state, action, env_params
@@ -433,20 +487,21 @@ def evaluate(
         episode_length += mask
 
         if keep_states:
-            return (rng, obs, next_state, done, next_mask, episode_length), (
+            return (rng, hstate, obs, next_state, done, next_mask, episode_length), (
                 state,
                 reward,
             )
         else:
-            return (rng, obs, next_state, done, next_mask, episode_length), (
+            return (rng, hstate, obs, next_state, done, next_mask, episode_length), (
                 None,
                 reward,
             )
 
-    (_, _, _, _, _, episode_lengths), (states, rewards) = jax.lax.scan(
+    (_, _, _, _, _, _, episode_lengths), (states, rewards) = jax.lax.scan(
         step,
         (
             rng,
+            init_hstate,
             init_obs,
             init_env_state,
             jnp.zeros(num_levels, dtype=bool),
@@ -466,51 +521,86 @@ class ActorCritic(nn.Module):
     action_dim: Sequence[int]
 
     @nn.compact
-    def __call__(self, x):
-        activation = nn.tanh
-
-        actor_mean = nn.Dense(
-            LAYER_WIDTH, kernel_init=orthogonal(np.sqrt(2)), bias_init=constant(0.0)
+    def __call__(self, inputs, hidden):
+        
+        x, dones = inputs 
+        
+        # 2 layer embed 
+        base_activation = nn.relu
+        embed = nn.Dense(
+            LAYER_WIDTH, 
+            kernel_init=orthogonal(np.sqrt(2)), 
+            bias_init=constant(0.0)
         )(x)
-        actor_mean = activation(actor_mean)
+        embed = base_activation(embed)
+
+        embed = nn.Dense(
+            LAYER_WIDTH, 
+            kernel_init=orthogonal(np.sqrt(2)), 
+            bias_init=constant(0.0)
+        )(x)
+        embed = base_activation(embed)
+
+        # recurrent layer
+        rnn_in = (embed, dones)
+        hidden, x = ResetRNN(
+            nn.OptimizedLSTMCell(features=LAYER_WIDTH,)
+        )(
+            rnn_in, initial_carry=hidden
+        )
+
+        ### 2 layers of actor #### 
+        head_activation = nn.tanh
 
         actor_mean = nn.Dense(
-            LAYER_WIDTH, kernel_init=orthogonal(np.sqrt(2)), bias_init=constant(0.0)
+            LAYER_WIDTH//2, 
+            kernel_init=orthogonal(np.sqrt(2)), 
+            bias_init=constant(0.0)
+        )(x)
+        actor_mean = head_activation(actor_mean)
+
+        actor_mean = nn.Dense(
+            LAYER_WIDTH//2, 
+            kernel_init=orthogonal(np.sqrt(2)), 
+            bias_init=constant(0.0)
         )(actor_mean)
-        actor_mean = activation(actor_mean)
+        actor_mean = head_activation(actor_mean)
 
         actor_mean = nn.Dense(
-            LAYER_WIDTH, kernel_init=orthogonal(np.sqrt(2)), bias_init=constant(0.0)
-        )(actor_mean)
-        actor_mean = activation(actor_mean)
-
-        actor_mean = nn.Dense(
-            self.action_dim, kernel_init=orthogonal(0.01), bias_init=constant(0.0)
+            self.action_dim, 
+            kernel_init=orthogonal(0.01), 
+            bias_init=constant(0.0)
         )(actor_mean)
         pi = distrax.Categorical(logits=actor_mean)
 
+        #### 2 layers of critic ####
         critic = nn.Dense(
-            LAYER_WIDTH, kernel_init=orthogonal(np.sqrt(2)), bias_init=constant(0.0)
+            LAYER_WIDTH//2, 
+            kernel_init=orthogonal(np.sqrt(2)), 
+            bias_init=constant(0.0)
         )(x)
-        critic = activation(critic)
+        critic = head_activation(critic)
 
         critic = nn.Dense(
-            LAYER_WIDTH, kernel_init=orthogonal(np.sqrt(2)), bias_init=constant(0.0)
+            LAYER_WIDTH//2, 
+            kernel_init=orthogonal(np.sqrt(2)), 
+            bias_init=constant(0.0)
         )(critic)
-        critic = activation(critic)
+        critic = head_activation(critic)
 
         critic = nn.Dense(
-            LAYER_WIDTH, kernel_init=orthogonal(np.sqrt(2)), bias_init=constant(0.0)
-        )(critic)
-        critic = activation(critic)
-
-        critic = nn.Dense(1, kernel_init=orthogonal(1.0), bias_init=constant(0.0))(
+            1, 
+            kernel_init=orthogonal(1.0), 
+            bias_init=constant(0.0))(
             critic
         )
+        return hidden, pi, jnp.squeeze(critic, axis=-1)
 
-        return pi, jnp.squeeze(critic, axis=-1)
-
-
+    @staticmethod
+    def initialize_carry(batch_dims):
+        return nn.OptimizedLSTMCell(features=RECURRENT_WIDTH).initialize_carry(
+            jax.random.PRNGKey(0), (*batch_dims, RECURRENT_WIDTH)
+        )
 # endregion
 
 
@@ -807,24 +897,35 @@ def main(config=None, project="JAXUED_TEST"):
             return config["lr"] * frac
 
         obs, _ = env.reset_to_level(rng, sample_random_level(rng), env_params)
-        obs = jax.tree_map(
+        obs = jax.tree_util.tree_map(
             lambda x: jnp.repeat(
-                jnp.repeat(x[None, ...], config["num_train_envs"], axis=0)[None, ...],
-                256,
-                axis=0,
-            ),
+                x[None, ...], 
+                config["num_train_envs"], 
+                axis=0
+            )[None, ...],
             obs,
         )
-
+        init_x = (
+            obs, 
+            jnp.zeros(
+                (1, config["num_train_envs"],), 
+                dtype=jnp.bool
+            )
+        )
+        #print(f"init: {init_x[0].shape}, {init_x[1].shape}")
         network = ActorCritic(env.action_space(env_params).n)
-        network_params = network.init(rng, obs)
+        network_params = network.init(
+            rng, 
+            init_x,
+            ActorCritic.initialize_carry((config["num_train_envs"],))
+        )
         tx = optax.chain(
             optax.clip_by_global_norm(config["max_grad_norm"]),
-            optax.adam(learning_rate=config["lr"], eps=1e-5),
+            optax.adam(learning_rate=linear_schedule, eps=1e-5),
         )
         pholder_level = sample_random_level(jax.random.PRNGKey(0))
         sampler = level_sampler.initialize(pholder_level, {"max_return": -jnp.inf})
-        pholder_level_batch = jax.tree_map(
+        pholder_level_batch = jax.tree_util.tree_map(
             lambda x: jnp.array([x]).repeat(config["num_train_envs"], axis=0),
             pholder_level,
         )
@@ -866,21 +967,22 @@ def main(config=None, project="JAXUED_TEST"):
                 new_levels,
                 env_params,
             )
+            #print(f"#### TRAIN init_obs: {init_obs.shape}")
             # Rollout
             (
-                (rng, train_state, last_obs, last_env_state),
+                (rng, train_state, _, _, _),
                 (
-                    obs,
-                    actions,
+                    _,
+                    _,
                     rewards,
                     dones,
-                    log_probs,
+                    _,
                     values,
                     info,
                     advantages,
-                    targets,
+                    _,
                     losses,
-                    grads,
+                    grad_norms,
                 ),
             ) = sample_trajectories_and_learn(
                 env,
@@ -888,6 +990,7 @@ def main(config=None, project="JAXUED_TEST"):
                 config,
                 rng,
                 train_state,
+                ActorCritic.initialize_carry((config["num_train_envs"],)),
                 init_obs,
                 init_env_state,
                 update_grad=config["exploratory_grad_updates"],
@@ -898,7 +1001,7 @@ def main(config=None, project="JAXUED_TEST"):
                 sampler, new_levels, scores, {"max_return": max_returns}
             )
             metrics = {
-                "losses": jax.tree_map(lambda x: x.mean(), losses),
+                "losses": jax.tree_util.tree_map(lambda x: x.mean(), losses),
                 "train/achievements": (info["achievements"] * dones[..., None])
                 .sum(axis=0)
                 .sum(axis=0)
@@ -913,7 +1016,7 @@ def main(config=None, project="JAXUED_TEST"):
                 "levels_played": init_env_state.env_state,
                 "mean_returns": (info["returned_episode_returns"] * dones).sum()
                 / dones.sum(),
-                "grad_norms": grads.mean(),
+                "grad_norms": grad_norms.mean(),
             }
 
             train_state = train_state.replace(
@@ -938,20 +1041,21 @@ def main(config=None, project="JAXUED_TEST"):
             init_obs, init_env_state = jax.vmap(
                 env.reset_to_level, in_axes=(0, 0, None)
             )(jax.random.split(rng_reset, config["num_train_envs"]), levels, env_params)
+            # Rollout
             (
-                (rng, train_state, last_obs, last_env_state),
+                (rng, train_state, _, _, _),
                 (
-                    obs,
-                    actions,
+                    _,
+                    _,
                     rewards,
                     dones,
-                    log_probs,
+                    _,
                     values,
                     info,
                     advantages,
-                    targets,
+                    _,
                     losses,
-                    grads,
+                    grad_norms,
                 ),
             ) = sample_trajectories_and_learn(
                 env,
@@ -959,6 +1063,7 @@ def main(config=None, project="JAXUED_TEST"):
                 config,
                 rng,
                 train_state,
+                ActorCritic.initialize_carry((config["num_train_envs"],)),
                 init_obs,
                 init_env_state,
                 update_grad=True,
@@ -974,7 +1079,7 @@ def main(config=None, project="JAXUED_TEST"):
             )
 
             metrics = {
-                "losses": jax.tree_map(lambda x: x.mean(), losses),
+                "losses": jax.tree_util.tree_map(lambda x: x.mean(), losses),
                 "train/achievements": (info["achievements"] * dones[..., None])
                 .sum(axis=0)
                 .sum(axis=0)
@@ -989,7 +1094,7 @@ def main(config=None, project="JAXUED_TEST"):
                 "levels_played": init_env_state.env_state,
                 "mean_returns": (info["returned_episode_returns"] * dones).sum()
                 / dones.sum(),
-                "grad_norms": grads.mean(),
+                "grad_norms": grad_norms.mean(),
             }
 
             train_state = train_state.replace(
@@ -1023,22 +1128,21 @@ def main(config=None, project="JAXUED_TEST"):
                 env_params,
             )
 
-            # rollout
-
+            # Rollout
             (
-                (rng, train_state, last_obs, last_env_state),
+                (rng, train_state, _, _, _),
                 (
-                    obs,
-                    actions,
+                    _,
+                    _,
                     rewards,
                     dones,
-                    log_probs,
+                    _,
                     values,
                     info,
                     advantages,
-                    targets,
+                    _,
                     losses,
-                    grads,
+                    grad_norms,
                 ),
             ) = sample_trajectories_and_learn(
                 env,
@@ -1046,6 +1150,7 @@ def main(config=None, project="JAXUED_TEST"):
                 config,
                 rng,
                 train_state,
+                ActorCritic.initialize_carry((config["num_train_envs"],)),
                 init_obs,
                 init_env_state,
                 update_grad=config["exploratory_grad_updates"],
@@ -1058,7 +1163,7 @@ def main(config=None, project="JAXUED_TEST"):
             )
 
             metrics = {
-                "losses": jax.tree_map(lambda x: x.mean(), losses),
+                "losses": jax.tree_util.tree_map(lambda x: x.mean(), losses),
                 "train/achievements": (info["achievements"] * dones[..., None])
                 .sum(axis=0)
                 .sum(axis=0)
@@ -1073,7 +1178,7 @@ def main(config=None, project="JAXUED_TEST"):
                 "levels_played": init_env_state.env_state,
                 "mean_returns": (info["returned_episode_returns"] * dones).sum()
                 / dones.sum(),
-                "grad_norms": grads.mean(),
+                "grad_norms": grad_norms.mean(),
             }
 
             train_state = train_state.replace(
@@ -1121,12 +1226,14 @@ def main(config=None, project="JAXUED_TEST"):
         init_obs, init_env_state = jax.vmap(eval_env.reset_to_level, (0, 0, None))(
             jax.random.split(rng_reset, num_levels), levels, env_params
         )
-        states, rewards, episode_lengths = evaluate(
+        #print(f"#### EVAL init_obs: {init_obs.shape}")
+        states, rewards, episode_lengths = evaluate_rnn(
             rng,
             eval_env,
             env_params,
             train_state,
             init_obs,
+            ActorCritic.initialize_carry((num_levels,)),
             init_env_state,
             config["num_eval_steps"],
             keep_states=keep_states,
@@ -1161,12 +1268,12 @@ def main(config=None, project="JAXUED_TEST"):
         eval_returns = cum_rewards.mean(axis=0)  # (num_eval_levels,)
 
         # just grab the first run
-        states, episode_lengths = jax.tree_map(
+        states, episode_lengths = jax.tree_util.tree_map(
             lambda x: x[0], 
             (states, episode_lengths)
         )  # (num_steps, num_eval_levels, ...), (num_eval_levels,)
         # And one attempt
-        states = jax.tree_map(lambda x: x[:, :1], states)
+        states = jax.tree_util.tree_map(lambda x: x[:, :1], states)
         episode_lengths = episode_lengths[:1]
         images = jax.vmap(jax.vmap(render_craftax_pixels, (0, None)), (0, None))(
             states.env_state.env_state, BLOCK_PIXEL_SIZE_IMG
@@ -1187,17 +1294,17 @@ def main(config=None, project="JAXUED_TEST"):
         max_num_images = 32
 
         metrics["dr_levels"] = jax.vmap(render_craftax_pixels, (0, None))(
-            jax.tree_map(lambda x: x[:max_num_images], train_state.dr_last_level_batch),
+            jax.tree_util.tree_map(lambda x: x[:max_num_images], train_state.dr_last_level_batch),
             BLOCK_PIXEL_SIZE_IMG,
         )
         metrics["replay_levels"] = jax.vmap(render_craftax_pixels, (0, None))(
-            jax.tree_map(
+            jax.tree_util.tree_map(
                 lambda x: x[:max_num_images], train_state.replay_last_level_batch
             ),
             BLOCK_PIXEL_SIZE_IMG,
         )
         metrics["mutation_levels"] = jax.vmap(render_craftax_pixels, (0, None))(
-            jax.tree_map(
+            jax.tree_util.tree_map(
                 lambda x: x[:max_num_images], train_state.mutation_last_level_batch
             ),
             BLOCK_PIXEL_SIZE_IMG,

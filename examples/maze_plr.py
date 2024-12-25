@@ -101,9 +101,22 @@ def sample_trajectories_rnn(
     num_envs: int,
     max_episode_length: int,
 ) -> Tuple[
-    Tuple[chex.PRNGKey, TrainState, chex.ArrayTree, Observation, EnvState, chex.Array],
     Tuple[
-        Observation, chex.Array, chex.Array, chex.Array, chex.Array, chex.Array, dict
+        chex.PRNGKey, 
+        TrainState, 
+        chex.ArrayTree, 
+        Observation, 
+        EnvState, 
+        chex.Array
+    ],
+    Tuple[
+        Observation,
+        chex.Array, 
+        chex.Array,
+        chex.Array,
+        chex.Array,
+        chex.Array, 
+        dict
     ],
 ]:
     """This samples trajectories from the environment using the agent specified by the `train_state`.
@@ -327,6 +340,7 @@ def update_actor_critic_rnn(
 
         rng, train_state = carry
         rng, rng_perm = jax.random.split(rng)
+        
         permutation = jax.random.permutation(rng_perm, num_envs)
         minibatches = (
             jax.tree_map(
