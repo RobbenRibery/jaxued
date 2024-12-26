@@ -12,7 +12,7 @@ import jax.numpy as jnp
 import numpy as np
 import optax
 import orbax.checkpoint as ocp
-from craftax.craftax.constants import BLOCK_PIXEL_SIZE_IMG
+from craftax.craftax.constants import BLOCK_PIXEL_SIZE_IMG, Achievement
 from craftax.craftax.envs.craftax_pixels_env import CraftaxPixelsEnv
 from craftax.craftax.envs.craftax_symbolic_env import CraftaxSymbolicEnv
 from craftax.craftax.renderer import render_craftax_pixels as render_pixels
@@ -43,7 +43,7 @@ from jaxued.wrappers import AutoReplayWrapper
 import sys
 
 sys.path.append(".")
-from examples.craftax.craftax_wrappers import CraftaxLoggerGymnaxWrapper, LogWrapper
+from examples.craftax.craftax_wrappers import LogWrapper
 from examples.craftax.mutators import (
     make_mutator_craftax_mutate_angles,
     make_mutator_craftax_swap,
@@ -156,7 +156,11 @@ def sample_trajectories_rnn(
         max_episode_length (int): The maximum episode length, i.e., the number of steps to do the rollouts for.
 
     Returns:
-        Tuple[Tuple[chex.PRNGKey, TrainState, Observation, EnvState, chex.Array], Tuple[Observation, chex.Array, chex.Array, chex.Array, chex.Array, chex.Array, dict]]: (rng, train_state, last_obs, last_env_state, last_value), traj, where traj is (obs, action, reward, done, log_prob, value, info). The first element in the tuple consists of arrays that have shapes (NUM_ENVS, ...) (except `rng` and and `train_state` which are singleton). The second element in the tuple is of shape (NUM_STEPS, NUM_ENVS, ...), and it contains the trajectory.
+        Tuple[Tuple[chex.PRNGKey, TrainState, Observation, EnvState, chex.Array], 
+        Tuple[Observation, chex.Array, chex.Array, chex.Array, chex.Array, chex.Array, dict]]: 
+        (rng, train_state, last_obs, last_env_state, last_value), traj, where traj is (obs, action, reward, done, log_prob, value, info). 
+        The first element in the tuple consists of arrays that have shapes (NUM_ENVS, ...) (except `rng` and and `train_state` which are singleton). 
+        The second element in the tuple is of shape (NUM_STEPS, NUM_ENVS, ...), and it contains the trajectory.
     """
 
     def sample_step(carry, _):
@@ -358,7 +362,10 @@ def sample_trajectories_and_learn(
         - learn / update policy
 
     And it loops it for config['outer_rollout_steps'].
-    What is returns is a new carry (rng, train_state, init_obs, init_env_state), and concatenated rollouts. The shape of the rollouts are config['num_steps'] * config['outer_rollout_steps']. In other words, the trajectories returned by this function are the same as if we ran rollouts for config['num_steps'] * config['outer_rollout_steps'] steps, but the agent does perform PPO updates in between.
+    What is returns is a new carry (rng, train_state, init_obs, init_env_state), and concatenated rollouts. 
+    The shape of the rollouts are config['num_steps'] * config['outer_rollout_steps']. 
+    In other words, the trajectories returned by this function are the same as if we ran rollouts for config['num_steps'] * config['outer_rollout_steps'] steps, 
+        but the agent does perform PPO updates in between.
 
     Args:
         env (UnderspecifiedEnv):
@@ -371,7 +378,9 @@ def sample_trajectories_and_learn(
         update_grad (bool, optional): Defaults to True.
 
     Returns:
-        Tuple[Tuple[chex.PRNGKey, TrainState, Observation, EnvState], Tuple[Observation, chex.Array, chex.Array, chex.Array, chex.Array, chex.Array, dict, chex.Array, chex.Array, chex.ArrayTree, chex.Array]]: This returns a tuple:
+        Tuple[
+            Tuple[chex.PRNGKey, TrainState, Observation, EnvState], Tuple[Observation, chex.Array, chex.Array, chex.Array, chex.Array, chex.Array, dict, chex.Array, chex.Array, chex.ArrayTree, chex.Array]
+        ]: This returns a tuple:
         (
             (rng, train_state, init_obs, init_env_state),
             (obs, actions, rewards, dones, log_probs, values, info, advantages, targets, losses, grads)
@@ -472,14 +481,11 @@ def evaluate_rnn(
         rng, hstate, obs, state, done, mask, episode_length = carry
         rng, rng_action, rng_step = jax.random.split(rng, 3)
 
-        #print(f"#### {obs.shape}")
-        #print(f"#### {done.shape}")
-
         x = jax.tree_util.tree_map(lambda x: x[None, ...], (obs, done))
         hstate, pi, _ = train_state.apply_fn(train_state.params, x, hstate)
         action = pi.sample(seed=rng_action).squeeze(0)
 
-        obs, next_state, reward, done, _ = jax.vmap(env.step, in_axes=(0, 0, 0, None))(
+        obs, next_state, reward, done, info = jax.vmap(env.step, in_axes=(0, 0, 0, None))(
             jax.random.split(rng_step, num_levels), state, action, env_params
         )
 
@@ -490,14 +496,18 @@ def evaluate_rnn(
             return (rng, hstate, obs, next_state, done, next_mask, episode_length), (
                 state,
                 reward,
+                done,
+                info
             )
         else:
             return (rng, hstate, obs, next_state, done, next_mask, episode_length), (
                 None,
                 reward,
+                done,
+                info
             )
 
-    (_, _, _, _, _, _, episode_lengths), (states, rewards) = jax.lax.scan(
+    (_, _, _, _, _, _, episode_lengths), (states, rewards, dones, infos) = jax.lax.scan(
         step,
         (
             rng,
@@ -512,7 +522,7 @@ def evaluate_rnn(
         length=max_episode_length,
     )
 
-    return states, rewards, episode_lengths
+    return states, rewards, dones, infos, episode_lengths
 
 
 class ActorCritic(nn.Module):
@@ -637,8 +647,6 @@ def setup_checkpointing(
         ),
     )
     return checkpoint_manager
-
-
 # endregion
 
 
@@ -666,6 +674,7 @@ def train_state_to_log_dict(
             "level_sampler/size": sampler["size"],
             "level_sampler/episode_count": sampler["episode_count"],
             "level_sampler/max_score": sampler["scores"].max(),
+            "level_sampler/min_score": sampler["scores"].min(),
             "level_sampler/weighted_score": (
                 sampler["scores"] * level_sampler.level_weights(sampler)
             ).sum(),
@@ -705,7 +714,7 @@ def main(config=None, project="JAXUED_TEST"):
     else:
         tags.append("PLR")
         
-    run = wandb.init(
+    wandb.init(
         config=config, 
         project=project, 
         group=config["group_name"], 
@@ -719,11 +728,19 @@ def main(config=None, project="JAXUED_TEST"):
     wandb.define_metric("solve_rate/*", step_metric="num_updates")
     wandb.define_metric("level_sampler/*", step_metric="num_updates")
     wandb.define_metric("agent/*", step_metric="num_updates")
-    wandb.define_metric("return/*", step_metric="num_updates")
-    wandb.define_metric("eval_ep_lengths/*", step_metric="num_updates")
+    wandb.define_metric("train/*", step_metric="num_updates")
+    wandb.define_metric("eval/*", step_metric="num_updates")
+    #wandb.define_metric("eval_ep_lengths/*", step_metric="num_updates")
 
-    def log_eval(stats, train_state_info):
+    def log_train_eval(stats:chex.ArrayTree, train_state_info:chex.ArrayTree):
+        """stats is nothing but the metrics from the eval and train loop
+
+        Args:
+            stats (chex.ArrayTree): _description_
+            train_state_info (chex.ArrayTree): _description_
+        """
         print(f"Logging update: {stats['update_count']}")
+        stats.pop(["levels_played"], None)
 
         # generic stats
         env_steps = (
@@ -744,13 +761,78 @@ def main(config=None, project="JAXUED_TEST"):
             "sps": env_steps_delta / stats["time_delta"],
         }
 
+        def _get_stage_train_metrics(stats_:chex.ArrayTree, stage_:int) -> chex.ArrayTree:
+
+            prefix = {
+                0: "gen",
+                1: "replay",
+                2: "mutation",
+            }[stage_]
+
+            stage_selector = stats_["stage"] == stage_
+            stage_stats = {}
+            for k, v in stats.items():
+                if k not in {"stage","losses","grad_norms"}:
+                    if "max" in k:
+                        stage_stats[f"{prefix}/{k}"] = v[stage_selector].max(axis=0)
+                    elif k == "scores":
+                        stage_stats[f"{prefix}/{k}"] = v[stage_selector].mean()
+                    else:
+                        stage_stats[f"{prefix}/{k}"] = v[stage_selector].mean(axis=0)
+
+            stage_stats.update(
+                jax.tree_util.tree_map(
+                    lambda idx: stage_stats[f"{prefix}/achievements"].at[idx].get(),
+                    {
+                        f"achievements_{ac.name.lower()}" : ac.value \
+                        for ac in Achievement
+                    }
+                )
+            )
+            del stage_stats[f"{prefix}/achievements"]
+            del stage_selector
+
+            return stage_stats
+
+        # train performance 
+        #### random 
+        log_dict.update(
+            _get_stage_train_metrics(stats, 0)
+        )
+
+        #### replay 
+        log_dict.update(
+            _get_stage_train_metrics(stats, 1)
+        )
+
+        #### mutate 
+        if config['use_accel']:
+            log_dict.update(
+                _get_stage_train_metrics(stats, 2)
+            )
+
         # evaluation performance
         returns = stats["eval_returns"]
-        log_dict.update({
-            "train/achievements": stats["train/achievements"]
-        })
+        # return 
         log_dict.update({"eval/mean_returns": returns.mean()})
+        log_dict.update({"eval/max_returns": returns.max()})  
+        log_dict.update({"eval/min_returns": returns.min()})
+
+        # eps length
         log_dict.update({"eval/mean_ep_lengths": stats["eval_ep_lengths"].mean()})
+        log_dict.update({"eval/max_ep_lengths": stats["eval_ep_lengths"].max()})
+        log_dict.update({"eval/min_ep_lengths": stats["eval_ep_lengths"].min()})
+
+        # achievements
+        log_dict.update(
+            jax.tree_util.tree_map(
+                lambda idx: stats["eval_achievements"].at[idx].get(),
+                {
+                    f"eval/achievements_{ac.name.lower()}" : ac.value \
+                    for ac in Achievement
+                }
+            )
+        )
 
         # level sampler
         log_dict.update(train_state_info["log"])
@@ -794,7 +876,7 @@ def main(config=None, project="JAXUED_TEST"):
 
         wandb.log(log_dict)
 
-    def sample_random_level(rng):
+    def sample_random_level(rng:chex.PRNGKey):
         if config["accel_mutation"] == "noise":
             rng, _rng1, _rng2, _rng3, _rng4 = jax.random.split(rng, 5)
             larger_res = (
@@ -995,28 +1077,26 @@ def main(config=None, project="JAXUED_TEST"):
                 init_env_state,
                 update_grad=config["exploratory_grad_updates"],
             )
+            # dones (total_steps, num_train_envs)
+            # rewards (total_steps, num_train_envs)
             max_returns = compute_max_returns(dones, rewards)
             scores = compute_ued_score(config, dones, values, max_returns, advantages)
             sampler, _ = level_sampler.insert_batch(
                 sampler, new_levels, scores, {"max_return": max_returns}
             )
+            
+            achievement_per_done_exp = ((info["achievements"] * dones[..., None]).sum(axis=0).sum(axis=0))/ dones.sum()
             metrics = {
                 "losses": jax.tree_util.tree_map(lambda x: x.mean(), losses),
-                "train/achievements": (info["achievements"] * dones[..., None])
-                .sum(axis=0)
-                .sum(axis=0)
-                / dones.sum(),
-                "achievement_count": (info["achievement_count"] * dones).sum()
-                / dones.sum(),
-                "returned_episode_lengths": (
-                    info["returned_episode_lengths"] * dones
-                ).sum()
-                / dones.sum(),
-                "max_episode_length": info["returned_episode_lengths"].max(),
+                "achievements": achievement_per_done_exp,
+                "achievement_count": (info["achievement_count"] * dones).sum()/ dones.sum(),
+                "mean_returned_episode_lengths": (info["returned_episode_lengths"] * dones).sum()/ dones.sum(),
+                "max_returned_episode_length": info["returned_episode_lengths"].max(),
                 "levels_played": init_env_state.env_state,
-                "mean_returns": (info["returned_episode_returns"] * dones).sum()
-                / dones.sum(),
+                "mean_returns": (info["returned_episode_returns"] * dones).sum()/ dones.sum(),
                 "grad_norms": grad_norms.mean(),
+                "scores": scores,
+                "stage":0,
             }
 
             train_state = train_state.replace(
@@ -1073,28 +1153,23 @@ def main(config=None, project="JAXUED_TEST"):
                 level_sampler.get_levels_extra(sampler, level_inds)["max_return"],
                 compute_max_returns(dones, rewards),
             )
-            scores = compute_ued_score(config, dones, values, max_returns, advantages)
+            scores = compute_ued_score(config, dones, values, max_returns, advantages) #(num_train_envs,)
             sampler = level_sampler.update_batch(
                 sampler, level_inds, scores, {"max_return": max_returns}
             )
 
+            achievement_per_done_exp = ((info["achievements"] * dones[..., None]).sum(axis=0).sum(axis=0))/ dones.sum()
             metrics = {
-                "losses": jax.tree_util.tree_map(lambda x: x.mean(), losses),
-                "train/achievements": (info["achievements"] * dones[..., None])
-                .sum(axis=0)
-                .sum(axis=0)
-                / dones.sum(),
-                "achievement_count": (info["achievement_count"] * dones).sum()
-                / dones.sum(),
-                "returned_episode_lengths": (
-                    info["returned_episode_lengths"] * dones
-                ).sum()
-                / dones.sum(),
-                "max_episode_length": info["returned_episode_lengths"].max(),
+                "losses": jax.tree_util.tree_map(lambda x: x.mean(), losses),  # this is a tuple of losses
+                "achievements": achievement_per_done_exp, # this is not a scalar    
+                "achievement_count": (info["achievement_count"] * dones).sum()/ dones.sum(),
+                "mean_returned_episode_lengths": (info["returned_episode_lengths"] * dones).sum()/ dones.sum(),
+                "max_returned_episode_length": info["returned_episode_lengths"].max(),
                 "levels_played": init_env_state.env_state,
-                "mean_returns": (info["returned_episode_returns"] * dones).sum()
-                / dones.sum(),
+                "mean_returns": (info["returned_episode_returns"] * dones).sum()/ dones.sum(),
                 "grad_norms": grad_norms.mean(),
+                "scores": scores,
+                "stage":1,
             }
 
             train_state = train_state.replace(
@@ -1162,23 +1237,18 @@ def main(config=None, project="JAXUED_TEST"):
                 sampler, child_levels, scores, {"max_return": max_returns}
             )
 
+            achievement_per_done_exp = ((info["achievements"] * dones[..., None]).sum(axis=0).sum(axis=0))/ dones.sum()
             metrics = {
                 "losses": jax.tree_util.tree_map(lambda x: x.mean(), losses),
-                "train/achievements": (info["achievements"] * dones[..., None])
-                .sum(axis=0)
-                .sum(axis=0)
-                / dones.sum(),
-                "achievement_count": (info["achievement_count"] * dones).sum()
-                / dones.sum(),
-                "returned_episode_lengths": (
-                    info["returned_episode_lengths"] * dones
-                ).sum()
-                / dones.sum(),
-                "max_episode_length": info["returned_episode_lengths"].max(),
+                "achievements": achievement_per_done_exp,
+                "achievement_count": (info["achievement_count"] * dones).sum()/ dones.sum(),
+                "mean_returned_episode_lengths": (info["returned_episode_lengths"] * dones).sum() / dones.sum(),
+                "max_returned_episode_length": info["returned_episode_lengths"].max(),
                 "levels_played": init_env_state.env_state,
-                "mean_returns": (info["returned_episode_returns"] * dones).sum()
-                / dones.sum(),
+                "mean_returns": (info["returned_episode_returns"] * dones).sum()/ dones.sum(),
                 "grad_norms": grad_norms.mean(),
+                "scores": scores,
+                "stage":2,
             }
 
             train_state = train_state.replace(
@@ -1227,7 +1297,7 @@ def main(config=None, project="JAXUED_TEST"):
             jax.random.split(rng_reset, num_levels), levels, env_params
         )
         #print(f"#### EVAL init_obs: {init_obs.shape}")
-        states, rewards, episode_lengths = evaluate_rnn(
+        states, rewards, dones, infos, episode_lengths = evaluate_rnn(
             rng,
             eval_env,
             env_params,
@@ -1240,10 +1310,12 @@ def main(config=None, project="JAXUED_TEST"):
         )
         mask = jnp.arange(config["num_eval_steps"])[..., None] < episode_lengths
         cum_rewards = (rewards * mask).sum(axis=0)
+        achievement_per_eval_done_exp = ((infos["achievements"] * dones[..., None]).sum(axis=0).sum(axis=0))/ dones.sum()
         return (
             states,
             cum_rewards,
             episode_lengths,
+            achievement_per_eval_done_exp,
         )  # (num_steps, num_eval_levels, ...), (num_eval_levels,), (num_eval_levels,)
 
     @jax.jit
@@ -1256,10 +1328,11 @@ def main(config=None, project="JAXUED_TEST"):
         (rng, train_state), metrics = jax.lax.scan(
             train_step, runner_state, None, config["eval_freq"]
         )
+        # metrics shape (eval_freq, metric shape)
 
         # Eval
         rng, rng_eval = jax.random.split(rng)
-        states, cum_rewards, episode_lengths = jax.vmap(eval, (0, None))(
+        states, cum_rewards, episode_lengths, eval_achivements_per_exp = jax.vmap(eval, (0, None))(
             jax.random.split(rng_eval, config["eval_num_attempts"]), 
             train_state
         )
@@ -1290,6 +1363,7 @@ def main(config=None, project="JAXUED_TEST"):
         metrics["eval_returns"] = eval_returns
         metrics["eval_ep_lengths"] = episode_lengths
         metrics["eval_animation"] = (frames, episode_lengths)
+        metrics["eval_achivements"] = eval_achivements_per_exp
 
         max_num_images = 32
 
@@ -1391,7 +1465,7 @@ def main(config=None, project="JAXUED_TEST"):
         runner_state, metrics = train_and_eval_step(runner_state, None)
         curr_time = time.time()
         metrics["time_delta"] = curr_time - start_time
-        log_eval(
+        log_train_eval(
             metrics, 
             train_state_to_log_dict(runner_state[1], level_sampler)
         )
@@ -1457,7 +1531,7 @@ if __name__ == "__main__":
     group.add_argument(
         "--exploratory_grad_updates",
         action=argparse.BooleanOptionalAction,
-        default=True,
+        default=False,
     )
     group.add_argument("--level_buffer_capacity", type=int, default=4000)
     group.add_argument("--replay_prob", type=float, default=0.5)

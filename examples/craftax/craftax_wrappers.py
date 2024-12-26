@@ -5,6 +5,7 @@ import chex
 import jax
 import jax.numpy as jnp
 from craftax.craftax.constants import Achievement
+from craftax.craftax.craftax_state import EnvState as CraftaxEnvState
 from flax import struct
 
 from jaxued.environments import UnderspecifiedEnv
@@ -45,24 +46,26 @@ class LogWrapper(UnderspecifiedEnv):
     def default_params(self) -> EnvParams:
         return self._env.default_params
 
-    @partial(jax.jit, static_argnums=(0, 3))
+    @partial(jax.jit, static_argnums=(0, ))
     def reset_env_to_level(
         self, rng: chex.PRNGKey, level: Level, params: EnvParams
     ) -> Tuple[Observation, EnvState]:
         state = LogEnvState(level, 0.0, 0, 0.0, 0, 0)
         return self.get_obs(state), state
 
-    @partial(jax.jit, static_argnums=(0, 4))
+    @partial(jax.jit, static_argnums=(0,))
     def step_env(
         self,
         key: chex.PRNGKey,
-        state: EnvState,
+        state: LogEnvState,
         action: Union[int, float],
         params: Optional[EnvParams] = None,
     ) -> Tuple[chex.Array, EnvState, float, bool, dict]:
         obs, env_state, reward, done, info = self._env.step_env(
             key, state.env_state, action, params
         )
+        env_state:EnvState | CraftaxEnvState
+
         new_episode_return = state.episode_returns + reward
         new_episode_length = state.episode_lengths + 1
         state = LogEnvState(
