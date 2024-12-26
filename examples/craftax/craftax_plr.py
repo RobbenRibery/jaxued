@@ -740,7 +740,7 @@ def main(config=None, project="JAXUED_TEST"):
             train_state_info (chex.ArrayTree): _description_
         """
         print(f"Logging update: {stats['update_count']}")
-        stats.pop(["levels_played"], None)
+        stats.pop("levels_played", None)
 
         # generic stats
         env_steps = (
@@ -771,8 +771,19 @@ def main(config=None, project="JAXUED_TEST"):
 
             stage_selector = stats_["stage"] == stage_
             stage_stats = {}
+            if stage_selector.sum() == 0:
+                return stage_stats
+
             for k, v in stats.items():
-                if k not in {"stage","losses","grad_norms"}:
+                if k in {
+                    "achievements",
+                    "achievement_count",
+                    "grad_norms",
+                    "mean_returned_episode_length",
+                    "max_returned_episode_length",
+                    "mean_returns",
+                    "scores",
+                }:
                     if "max" in k:
                         stage_stats[f"{prefix}/{k}"] = v[stage_selector].max(axis=0)
                     elif k == "scores":
@@ -1090,7 +1101,7 @@ def main(config=None, project="JAXUED_TEST"):
                 "losses": jax.tree_util.tree_map(lambda x: x.mean(), losses),
                 "achievements": achievement_per_done_exp,
                 "achievement_count": (info["achievement_count"] * dones).sum()/ dones.sum(),
-                "mean_returned_episode_lengths": (info["returned_episode_lengths"] * dones).sum()/ dones.sum(),
+                "mean_returned_episode_length": (info["returned_episode_lengths"] * dones).sum()/ dones.sum(),
                 "max_returned_episode_length": info["returned_episode_lengths"].max(),
                 "levels_played": init_env_state.env_state,
                 "mean_returns": (info["returned_episode_returns"] * dones).sum()/ dones.sum(),
@@ -1163,7 +1174,7 @@ def main(config=None, project="JAXUED_TEST"):
                 "losses": jax.tree_util.tree_map(lambda x: x.mean(), losses),  # this is a tuple of losses
                 "achievements": achievement_per_done_exp, # this is not a scalar    
                 "achievement_count": (info["achievement_count"] * dones).sum()/ dones.sum(),
-                "mean_returned_episode_lengths": (info["returned_episode_lengths"] * dones).sum()/ dones.sum(),
+                "mean_returned_episode_length": (info["returned_episode_lengths"] * dones).sum()/ dones.sum(),
                 "max_returned_episode_length": info["returned_episode_lengths"].max(),
                 "levels_played": init_env_state.env_state,
                 "mean_returns": (info["returned_episode_returns"] * dones).sum()/ dones.sum(),
@@ -1242,7 +1253,7 @@ def main(config=None, project="JAXUED_TEST"):
                 "losses": jax.tree_util.tree_map(lambda x: x.mean(), losses),
                 "achievements": achievement_per_done_exp,
                 "achievement_count": (info["achievement_count"] * dones).sum()/ dones.sum(),
-                "mean_returned_episode_lengths": (info["returned_episode_lengths"] * dones).sum() / dones.sum(),
+                "mean_returned_episode_length": (info["returned_episode_lengths"] * dones).sum() / dones.sum(),
                 "max_returned_episode_length": info["returned_episode_lengths"].max(),
                 "levels_played": init_env_state.env_state,
                 "mean_returns": (info["returned_episode_returns"] * dones).sum()/ dones.sum(),
