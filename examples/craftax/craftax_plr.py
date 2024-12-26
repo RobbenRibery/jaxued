@@ -795,7 +795,7 @@ def main(config=None, project="JAXUED_TEST"):
                 jax.tree_util.tree_map(
                     lambda idx: stage_stats[f"{prefix}/achievements"].at[idx].get(),
                     {
-                        f"achievements_{ac.name.lower()}" : ac.value \
+                        f"{prefix}/achievements_{ac.name.lower()}" : ac.value \
                         for ac in Achievement
                     }
                 )
@@ -835,6 +835,7 @@ def main(config=None, project="JAXUED_TEST"):
         log_dict.update({"eval/min_ep_lengths": stats["eval_ep_lengths"].min()})
 
         # achievements
+        stats["eval_achievements"] = stats["eval_achievements"].mean(axis=0)
         log_dict.update(
             jax.tree_util.tree_map(
                 lambda idx: stats["eval_achievements"].at[idx].get(),
@@ -1322,7 +1323,7 @@ def main(config=None, project="JAXUED_TEST"):
         mask = jnp.arange(config["num_eval_steps"])[..., None] < episode_lengths
         cum_rewards = (rewards * mask).sum(axis=0)
         achievement_per_eval_done_exp = ((infos["achievements"] * dones[..., None]).sum(axis=0).sum(axis=0))/ dones.sum()
-        print(f"Eval achievement shape: {achievement_per_eval_done_exp.shape}")
+        print(f"Eval achievement shape: {achievement_per_eval_done_exp.shape}") #(#num_achievements, )
         return (
             states,
             cum_rewards,
@@ -1348,6 +1349,7 @@ def main(config=None, project="JAXUED_TEST"):
             jax.random.split(rng_eval, config["eval_num_attempts"]), 
             train_state
         )
+        print(f"Eval achievement shape across multiple runs: {eval_achivements_per_exp.shape}")
 
         # Collect Metrics
         eval_returns = cum_rewards.mean(axis=0)  # (num_eval_levels,)
@@ -1375,7 +1377,7 @@ def main(config=None, project="JAXUED_TEST"):
         metrics["eval_returns"] = eval_returns
         metrics["eval_ep_lengths"] = episode_lengths
         metrics["eval_animation"] = (frames, episode_lengths)
-        metrics["eval_achivements"] = eval_achivements_per_exp
+        metrics["eval_achievements"] = eval_achivements_per_exp
 
         max_num_images = 32
 
