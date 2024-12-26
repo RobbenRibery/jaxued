@@ -1322,6 +1322,7 @@ def main(config=None, project="JAXUED_TEST"):
         mask = jnp.arange(config["num_eval_steps"])[..., None] < episode_lengths
         cum_rewards = (rewards * mask).sum(axis=0)
         achievement_per_eval_done_exp = ((infos["achievements"] * dones[..., None]).sum(axis=0).sum(axis=0))/ dones.sum()
+        print(f"Eval achievement shape: {achievement_per_eval_done_exp.shape}")
         return (
             states,
             cum_rewards,
