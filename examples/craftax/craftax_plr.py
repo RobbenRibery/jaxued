@@ -2,7 +2,7 @@ import json
 import os
 import time
 from enum import IntEnum
-from typing import Sequence, Tuple
+from typing import Sequence, Tuple, Dict
 
 import chex
 import distrax
@@ -51,6 +51,7 @@ from examples.craftax.mutators import (
     make_mutator_craftax_claude_35_hard,
     make_mutator_craftax_claude_35_easy_hard,
 )
+from examples.craftax import craftax_evaluation
 
 LAYER_WIDTH = 512
 RECURRENT_WIDTH = 512
@@ -70,6 +71,26 @@ class TrainState(BaseTrainState):
     dr_last_level_batch: chex.ArrayTree = struct.field(pytree_node=True)
     replay_last_level_batch: chex.ArrayTree = struct.field(pytree_node=True)
     mutation_last_level_batch: chex.ArrayTree = struct.field(pytree_node=True)
+
+
+# region for level evlaution 
+@jax.jit 
+def evaluate_levels(env_state:EnvState) -> Dict[str, float]: 
+    env_metrics = {}
+    funcs = [
+        craftax_evaluation.compute_natural_resource_density_all_level,
+        craftax_evaluation.compute_path_density_all_level,
+        craftax_evaluation.compute_survival_resource_density_all_level,
+        craftax_evaluation.compute_crafting_potential_all_level,
+        craftax_evaluation.compute_progression_potential,
+        craftax_evaluation.compute_mob_challengeness,
+    ]
+    for func in funcs: 
+        env_metrics[(func.__name__)] = \
+            (jax.vmap(func)(env_state)).mean(axis=0)
+    return env_metrics
+
+# region end 
 
 
 # region PPO helper functions
@@ -740,7 +761,6 @@ def main(config=None, project="JAXUED_TEST"):
             train_state_info (chex.ArrayTree): _description_
         """
         print(f"Logging update: {stats['update_count']}")
-        stats.pop("levels_played", None)
 
         # generic stats
         env_steps = (
@@ -783,10 +803,19 @@ def main(config=None, project="JAXUED_TEST"):
                     "max_returned_episode_length",
                     "mean_returns",
                     "scores",
+                    # plr metrics, 
+                    "insertion_rate",
+                    # env metrics
+                    "compute_crafting_potential_all_level",
+                    "compute_mob_challengeness",
+                    "compute_natural_resource_density_all_level",
+                    "compute_path_density_all_level",
+                    "compute_progression_potential",
+                    "compute_survival_resource_density_all_level",
                 }:
                     if "max" in k:
                         stage_stats[f"{prefix}/{k}"] = v[stage_selector].max(axis=0)
-                    elif k == "scores":
+                    elif k == "scores" or "compute" in k or k == "insertion_rate":
                         stage_stats[f"{prefix}/{k}"] = v[stage_selector].mean()
                     else:
                         stage_stats[f"{prefix}/{k}"] = v[stage_selector].mean(axis=0)
@@ -1093,7 +1122,7 @@ def main(config=None, project="JAXUED_TEST"):
             # rewards (total_steps, num_train_envs)
             max_returns = compute_max_returns(dones, rewards)
             scores = compute_ued_score(config, dones, values, max_returns, advantages)
-            sampler, _ = level_sampler.insert_batch(
+            sampler, insertion_idxs = level_sampler.insert_batch(
                 sampler, new_levels, scores, {"max_return": max_returns}
             )
             
@@ -1104,12 +1133,13 @@ def main(config=None, project="JAXUED_TEST"):
                 "achievement_count": (info["achievement_count"] * dones).sum()/ dones.sum(),
                 "mean_returned_episode_length": (info["returned_episode_lengths"] * dones).sum()/ dones.sum(),
                 "max_returned_episode_length": info["returned_episode_lengths"].max(),
-                "levels_played": init_env_state.env_state,
                 "mean_returns": (info["returned_episode_returns"] * dones).sum()/ dones.sum(),
                 "grad_norms": grad_norms.mean(),
                 "scores": scores,
+                "insertion_rate": (insertion_idxs != -1).mean(),
                 "stage":0,
             }
+            metrics.update(evaluate_levels(init_env_state.env_state))
 
             train_state = train_state.replace(
                 sampler=sampler,
@@ -1177,12 +1207,13 @@ def main(config=None, project="JAXUED_TEST"):
                 "achievement_count": (info["achievement_count"] * dones).sum()/ dones.sum(),
                 "mean_returned_episode_length": (info["returned_episode_lengths"] * dones).sum()/ dones.sum(),
                 "max_returned_episode_length": info["returned_episode_lengths"].max(),
-                "levels_played": init_env_state.env_state,
                 "mean_returns": (info["returned_episode_returns"] * dones).sum()/ dones.sum(),
                 "grad_norms": grad_norms.mean(),
                 "scores": scores,
+                "insertion_rate": jnp.zeros((config["num_train_envs"],)),
                 "stage":1,
             }
+            metrics.update(evaluate_levels(init_env_state.env_state))
 
             train_state = train_state.replace(
                 sampler=sampler,
@@ -1245,7 +1276,7 @@ def main(config=None, project="JAXUED_TEST"):
 
             max_returns = compute_max_returns(dones, rewards)
             scores = compute_ued_score(config, dones, values, max_returns, advantages)
-            sampler, _ = level_sampler.insert_batch(
+            sampler, insertion_idxs = level_sampler.insert_batch(
                 sampler, child_levels, scores, {"max_return": max_returns}
             )
 
@@ -1256,12 +1287,13 @@ def main(config=None, project="JAXUED_TEST"):
                 "achievement_count": (info["achievement_count"] * dones).sum()/ dones.sum(),
                 "mean_returned_episode_length": (info["returned_episode_lengths"] * dones).sum() / dones.sum(),
                 "max_returned_episode_length": info["returned_episode_lengths"].max(),
-                "levels_played": init_env_state.env_state,
                 "mean_returns": (info["returned_episode_returns"] * dones).sum()/ dones.sum(),
                 "grad_norms": grad_norms.mean(),
                 "scores": scores,
+                "insertion_rate": (insertion_idxs != -1).mean(),
                 "stage":2,
             }
+            metrics.update(evaluate_levels(init_env_state.env_state))
 
             train_state = train_state.replace(
                 sampler=sampler,

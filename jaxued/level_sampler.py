@@ -169,11 +169,15 @@ class LevelSampler:
             return jax.lax.cond(
                 idx == -1,
                 lambda: self._insert_new(sampler, level, score, level_extra),
-                lambda: ({
-                    **self.update(sampler, idx, score, level_extra), # what happens to mutation rate here?
-                    "timestamps": sampler["timestamps"].at[idx].set(sampler["episode_count"] + 1),
-                    "episode_count": sampler["episode_count"] + 1
-                }, idx),
+                lambda: (
+                    {
+                        **self.update(sampler, idx, score, level_extra), # what happens to mutation rate here?
+                        "timestamps": sampler["timestamps"].at[idx].set(sampler["episode_count"] + 1),
+                        "episode_count": sampler["episode_count"] + 1
+                    }, 
+                    idx,
+                    False,
+                ),
             )
         return self._insert_new(sampler, level, score, level_extra)
     
@@ -376,6 +380,7 @@ class LevelSampler:
         sampler["scores"] = jnp.full(self.capacity, -jnp.inf, dtype=jnp.float32) 
         return sampler
     
+    # TODO: Add an output indicating how many levels were inserted in the end
     def _insert_new(self, sampler: Sampler, level: Level, score: float, level_extra: dict) -> Tuple[Sampler, int]:
         idx = self._get_next_idx(sampler)
         replace_cond = sampler["scores"][idx] < score
@@ -394,7 +399,7 @@ class LevelSampler:
             
         new_sampler = jax.lax.cond(replace_cond, _replace, lambda: sampler)
         new_sampler["episode_count"] += 1
-        
+        # return idx = -1 if not inserted, otherwise inserted
         return new_sampler, jax.lax.select(replace_cond, idx, -1)
     
     def _proportion_filled(self, sampler: Sampler) -> float:
