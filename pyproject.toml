@@ -33,6 +33,9 @@ dependencies = [
     "flax",
     "chex",
     "gymnax",
+    "distrax>=0.1.5",
+    "wandb>=0.24.0",
+    "ruff>=0.14.14",
 ]
 
 [project.optional-dependencies]
@@ -50,3 +53,6 @@ examples = [
 [project.urls]
 Homepage = "https://github.com/dramacow/jaxued"
 Issues = "https://github.com/dramacow/jaxued/issues"
+
+[tool.setuptools.packages.find]
+where = ["src"]
