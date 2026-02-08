@@ -43,6 +43,7 @@ dependencies = [
     "imageio",
     "moviepy",
     "pytest>=8.4.2",
+    "modal>=1.2.6",
 ]
 
 [project.urls]
