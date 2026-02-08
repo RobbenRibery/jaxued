@@ -27,10 +27,17 @@ from jaxued.environments.maze import (
     make_level_mutator_minimax,
 )
 from jaxued.level_sampler import LevelSampler
-from jaxued.utils import compute_max_returns, max_mc, positive_value_loss
+from jaxued.utils import (
+    compute_max_returns,
+    max_mc,
+    positive_value_loss,
+    abs_policy_grad,
+)
 from jaxued.wrappers import AutoReplayWrapper
 import chex
 from enum import IntEnum
+from typing import Optional, Dict, Any
+from policy_grad_utils import compute_raw_pg_grad_norms
 
 
 class UpdateState(IntEnum):
@@ -108,6 +115,10 @@ def sample_trajectories_rnn(
 ]:
     """This samples trajectories from the environment using the agent specified by the `train_state`.
 
+    Shape legend:
+        T = max_episode_length
+        N = num_envs
+
     Args:
 
         rng (chex.PRNGKey): Singleton
@@ -122,6 +133,29 @@ def sample_trajectories_rnn(
 
     Returns:
         Tuple[Tuple[chex.PRNGKey, TrainState, chex.ArrayTree, Observation, EnvState, chex.Array], Tuple[Observation, chex.Array, chex.Array, chex.Array, chex.Array, chex.Array, dict]]: (rng, train_state, hstate, last_obs, last_env_state, last_value), traj, where traj is (obs, action, reward, done, log_prob, value, info). The first element in the tuple consists of arrays that have shapes (NUM_ENVS, ...) (except `rng` and and `train_state` which are singleton). The second element in the tuple is of shape (NUM_STEPS, NUM_ENVS, ...), and it contains the trajectory.
+
+    Loop tensor trace (`sample_step`, scanned T times):
+        carry:
+            hstate leaves: (N, ...)
+            obs leaves: (N, ...)
+            env_state leaves: (N, ...)
+            last_done: (N,) bool
+        model input `x`:
+            obs leaves: (1, N, ...)
+            done: (1, N)
+        model outputs:
+            action/log_prob/value before squeeze: (1, N)
+            action/log_prob/value after squeeze: (N,)
+        `env.step` vmapped over N envs:
+            next_obs leaves: (N, ...)
+            reward/done: (N,)
+            info leaves: (N, ...)
+        scan outputs `traj`:
+            obs leaves: (T, N, ...)
+            actions/rewards/dones/log_probs/values: (T, N)
+            info leaves: (T, N, ...)
+        post-scan bootstrap value:
+            last_value: (N,)
     """
 
     def sample_step(carry, _):
@@ -186,6 +220,10 @@ def evaluate_rnn(
 ) -> Tuple[chex.Array, chex.Array, chex.Array]:
     """This runs the RNN on the environment, given an initial state and observation, and returns (states, rewards, episode_lengths)
 
+    Shape legend:
+        T = max_episode_length
+        L = num_levels
+
     Args:
         rng (chex.PRNGKey):
         env (UnderspecifiedEnv):
@@ -198,6 +236,24 @@ def evaluate_rnn(
 
     Returns:
         Tuple[chex.Array, chex.Array, chex.Array]: (States, rewards, episode lengths) ((NUM_STEPS, NUM_LEVELS), (NUM_STEPS, NUM_LEVELS), (NUM_LEVELS,)
+
+    Loop tensor trace (`step`, scanned T times):
+        carry:
+            hstate leaves: (L, ...)
+            obs/state leaves: (L, ...)
+            done/mask: (L,) bool
+            episode_length: (L,) int32
+        model input `x`:
+            obs leaves: (1, L, ...)
+            done: (1, L)
+        sampled action after squeeze: (L,)
+        `env.step` vmapped over L levels:
+            next obs/state leaves: (L, ...)
+            reward/done: (L,)
+        scan outputs:
+            states leaves: (T, L, ...)
+            rewards: (T, L)
+            episode_lengths: (L,)
     """
     num_levels = jax.tree_util.tree_flatten(init_obs)[0][0].shape[0]
 
@@ -252,8 +308,17 @@ def update_actor_critic_rnn(
     entropy_coeff: float,
     critic_coeff: float,
     update_grad: bool = True,
-) -> Tuple[Tuple[chex.PRNGKey, TrainState], chex.ArrayTree]:
+    compute_per_step_grads: bool = False,
+) -> Tuple[
+    Tuple[chex.PRNGKey, TrainState], Tuple[chex.ArrayTree, Optional[chex.Array]]
+]:
     """This function takes in a rollout, and PPO hyperparameters, and updates the train state.
+
+    Shape legend:
+        T = n_steps
+        N = num_envs
+        M = n_minibatch
+        B = N // M (minibatch env count)
 
     Args:
         rng (chex.PRNGKey):
@@ -268,13 +333,51 @@ def update_actor_critic_rnn(
         entropy_coeff (float):
         critic_coeff (float):
         update_grad (bool, optional): If False, the train state does not actually get updated. Defaults to True.
+        compute_per_step_grads (bool, optional): If True, compute and return per-step gradient norms.
 
     Returns:
-        Tuple[Tuple[chex.PRNGKey, TrainState], chex.ArrayTree]: It returns a new rng, the updated train_state, and the losses. The losses have structure (loss, (l_vf, l_clip, entropy))
+        Tuple of ((rng, train_state), (losses, grad_norms)).
+        grad_norms is None if compute_per_step_grads is False.
+
+    Loop tensor trace:
+        input batch tensors:
+            obs leaves: (T, N, ...)
+            actions/dones/log_probs/values/targets/advantages: (T, N)
+            last_dones: (T, N)
+        optional `per_step_grad_norms`: (T,)
+        epoch-level scan (`update_epoch`, scanned `n_epochs` times):
+            permutation: (N,)
+            reshaped minibatches:
+                init_hstate leaves: (M, B, ...)
+                obs leaves: (M, T, B, ...)
+                actions/last_dones/log_probs/values/targets/advantages: (M, T, B)
+        minibatch scan (`update_minibatch`, scanned M times):
+            minibatch tensors seen by loss:
+                init_hstate leaves: (B, ...)
+                obs leaves: (T, B, ...)
+                actions/last_dones/log_probs/values/targets/advantages: (T, B)
+                values_pred/log_probs_pred/ratio: (T, B)
+            scalar outputs per minibatch:
+                total_loss, l_vf, l_clip, entropy
+        returned `losses` leaves: (n_epochs, M)
     """
     obs, actions, dones, log_probs, values, targets, advantages = batch
     last_dones = jnp.roll(dones, 1, axis=0).at[0].set(False)
     batch = obs, actions, last_dones, log_probs, values, targets, advantages
+
+    # Compute per-step gradient norms before any updates (using original params)
+    per_step_grad_norms = None
+    if compute_per_step_grads:
+        per_step_grad_norms = compute_raw_pg_grad_norms(
+            apply_fn = train_state.apply_fn,
+            params = train_state.params,
+            obs = obs,
+            last_dones = last_dones,
+            actions = actions,
+            advantages = advantages,
+            init_hstate = init_hstate,
+            pg_n_minibatch = config["pg_n_minibatch"],
+        )
 
     def update_epoch(carry, _):
         def update_minibatch(train_state, minibatch):
@@ -345,7 +448,10 @@ def update_actor_critic_rnn(
         train_state, losses = jax.lax.scan(update_minibatch, train_state, minibatches)
         return (rng, train_state), losses
 
-    return jax.lax.scan(update_epoch, (rng, train_state), None, n_epochs)
+    (rng, train_state), losses = jax.lax.scan(
+        update_epoch, (rng, train_state), None, n_epochs
+    )
+    return (rng, train_state), (losses, per_step_grad_norms)
 
 
 class ActorCritic(nn.Module):
@@ -482,13 +588,39 @@ def train_state_to_log_dict(
     }
 
 
-def compute_score(config, dones, values, max_returns, advantages):
-    if config["score_function"] == "MaxMC":
+def compute_score(
+    config: Dict[str, Any],
+    dones: chex.Array,
+    values: chex.Array,
+    max_returns: chex.Array,
+    advantages: chex.Array,
+    grad_norms: Optional[chex.Array] = None,
+) -> chex.Array:
+    """Compute level score based on configured score function.
+
+    Args:
+        config: Configuration dict with 'score_function' key.
+        dones: Episode done flags. Shape: (num_steps, num_envs).
+        values: Value estimates. Shape: (num_steps, num_envs).
+        max_returns: Max return per env. Shape: (num_envs,).
+        advantages: Advantage estimates. Shape: (num_steps, num_envs).
+        grad_norms: Per-step, per-env gradient norms (for abs_pg).
+            Shape: (num_steps, num_envs).
+
+    Returns:
+        Score per environment. Shape: (num_envs,).
+    """
+    score_fn = config["score_function"]
+
+    if score_fn == "MaxMC":
         return max_mc(dones, values, max_returns)
-    elif config["score_function"] == "pvl":
+    elif score_fn == "pvl":
         return positive_value_loss(dones, advantages)
+    elif score_fn == "abs_pg":
+        assert grad_norms is not None, "abs_pg requires grad_norms"
+        return abs_policy_grad(dones, grad_norms)
     else:
-        raise ValueError(f"Unknown score function: {config['score_function']}")
+        raise ValueError(f"Unknown score function: {score_fn}")
 
 
 def main(config=None, project="JAXUED_TEST"):
@@ -667,12 +799,39 @@ def main(config=None, project="JAXUED_TEST"):
     def train_step(carry: Tuple[chex.PRNGKey, TrainState], _):
         """
         This is the main training loop. It basically calls either `on_new_levels`, `on_replay_levels`, or `on_mutate_levels` at every step.
+
+        Shape legend:
+            T = config["num_steps"]
+            N = config["num_train_envs"]
+            E = config["epoch_ppo"]
+            M = config["num_minibatches"]
+
+        Tensor trace shared by all branches:
+            rollout outputs:
+                obs leaves: (T, N, ...)
+                actions/rewards/dones/log_probs/values: (T, N)
+            derived tensors:
+                advantages/targets: (T, N)
+                max_returns/scores: (N,)
+                grad_norms (abs_pg variants): (T,)
+            PPO loss tree from `update_actor_critic_rnn`:
+                leaves shaped (E, M)
+                branch metric stores mean over (E, M) -> scalar leaves
         """
 
         def on_new_levels(rng: chex.PRNGKey, train_state: TrainState):
             """
             Samples new (randomly-generated) levels and evaluates the policy on these. It also then adds the levels to the level buffer if they have high-enough scores.
             The agent is updated on these trajectories iff `config["exploratory_grad_updates"]` is True.
+
+            Tensor trace:
+                new_levels leaves: (N, ...)
+                init_obs/init_env_state leaves: (N, ...)
+                rollout obs leaves: (T, N, ...)
+                rollout actions/rewards/dones/log_probs/values: (T, N)
+                advantages/targets: (T, N)
+                max_returns/scores: (N,)
+                losses leaves: (E, M)
             """
             sampler = train_state.sampler
 
@@ -690,47 +849,61 @@ def main(config=None, project="JAXUED_TEST"):
             )
             # Rollout
             (
-                (rng, train_state, hstate, last_obs, last_env_state, last_value),
-                (obs, actions, rewards, dones, log_probs, values, info),
+                (rng, train_state, _, _, _, last_value),
+                (obs, actions, rewards, dones, log_probs, values, _),
             ) = sample_trajectories_rnn(
-                rng,
-                env,
-                env_params,
-                train_state,
-                ActorCritic.initialize_carry((config["num_train_envs"],)),
-                init_obs,
-                init_env_state,
-                config["num_train_envs"],
-                config["num_steps"],
+                rng = rng,
+                env = env,
+                env_params = env_params,
+                train_state = train_state,
+                init_hstate = ActorCritic.initialize_carry((config["num_train_envs"],)),
+                init_obs = init_obs,
+                init_env_state = init_env_state,
+                num_envs = config["num_train_envs"],
+                max_episode_length = config["num_steps"],
             )
             advantages, targets = compute_gae(
-                config["gamma"],
-                config["gae_lambda"],
-                last_value,
-                values,
-                rewards,
-                dones,
+                gamma = config["gamma"],
+                lambd = config["gae_lambda"],
+                last_value = last_value,
+                values = values,
+                rewards = rewards,
+                dones = dones,          
             )
-            max_returns = compute_max_returns(dones, rewards)
-            scores = compute_score(config, dones, values, max_returns, advantages)
-            sampler, _ = level_sampler.insert_batch(
-                sampler, new_levels, scores, {"max_return": max_returns}
+            max_returns = compute_max_returns(dones=dones, rewards=rewards)
+
+            # Update first (with optional grad norm computation)
+            compute_grads = config["score_function"] == "abs_pg"
+            (rng, train_state), (losses, grad_norms) = update_actor_critic_rnn(
+                rng=rng,
+                train_state=train_state,
+                init_hstate=ActorCritic.initialize_carry((config["num_train_envs"],)),
+                batch=(obs, actions, dones, log_probs, values, targets, advantages),
+                num_envs=config["num_train_envs"],
+                n_steps=config["num_steps"],
+                n_minibatch=config["num_minibatches"],
+                n_epochs=config["epoch_ppo"],
+                clip_eps=config["clip_eps"],
+                entropy_coeff=config["entropy_coeff"],
+                critic_coeff=config["critic_coeff"],
+                update_grad=config["exploratory_grad_updates"],
+                compute_per_step_grads=compute_grads,
             )
 
-            # Update: train_state only modified if exploratory_grad_updates is on
-            (rng, train_state), losses = update_actor_critic_rnn(
-                rng,
-                train_state,
-                ActorCritic.initialize_carry((config["num_train_envs"],)),
-                (obs, actions, dones, log_probs, values, targets, advantages),
-                config["num_train_envs"],
-                config["num_steps"],
-                config["num_minibatches"],
-                config["epoch_ppo"],
-                config["clip_eps"],
-                config["entropy_coeff"],
-                config["critic_coeff"],
-                update_grad=config["exploratory_grad_updates"],
+            # Then compute scores (using grad_norms if available)
+            scores = compute_score(
+                config,
+                dones=dones,
+                values=values,
+                max_returns=max_returns,
+                advantages=advantages,
+                grad_norms=grad_norms,
+            )
+            sampler, _ = level_sampler.insert_batch(
+                sampler=sampler,
+                levels=new_levels,
+                scores=scores,
+                extra={"max_return": max_returns},
             )
 
             metrics = {
@@ -749,6 +922,16 @@ def main(config=None, project="JAXUED_TEST"):
         def on_replay_levels(rng: chex.PRNGKey, train_state: TrainState):
             """
             This samples levels from the level buffer, and updates the policy on them.
+
+            Tensor trace:
+                level_inds: (N,)
+                replay levels leaves: (N, ...)
+                init_obs/init_env_state leaves: (N, ...)
+                rollout obs leaves: (T, N, ...)
+                rollout actions/rewards/dones/log_probs/values: (T, N)
+                advantages/targets: (T, N)
+                max_returns/scores: (N,)
+                losses leaves: (E, M)
             """
             sampler = train_state.sampler
 
@@ -786,13 +969,10 @@ def main(config=None, project="JAXUED_TEST"):
                 level_sampler.get_levels_extra(sampler, level_inds)["max_return"],
                 compute_max_returns(dones, rewards),
             )
-            scores = compute_score(config, dones, values, max_returns, advantages)
-            sampler = level_sampler.update_batch(
-                sampler, level_inds, scores, {"max_return": max_returns}
-            )
 
-            # Update the policy using trajectories collected from replay levels
-            (rng, train_state), losses = update_actor_critic_rnn(
+            # Update first (with optional grad norm computation)
+            compute_grads = config["score_function"] == "abs_pg"
+            (rng, train_state), (losses, grad_norms) = update_actor_critic_rnn(
                 rng,
                 train_state,
                 ActorCritic.initialize_carry((config["num_train_envs"],)),
@@ -805,6 +985,23 @@ def main(config=None, project="JAXUED_TEST"):
                 config["entropy_coeff"],
                 config["critic_coeff"],
                 update_grad=True,
+                compute_per_step_grads=compute_grads,
+            )
+
+            # Then compute scores (using grad_norms if available)
+            scores = compute_score(
+                config = config,
+                dones=dones,
+                values=values,
+                max_returns=max_returns,
+                advantages=advantages,
+                grad_norms=grad_norms,
+            )
+            sampler = level_sampler.update_batch(
+                sampler=sampler,
+                level_inds=level_inds,
+                scores=scores,
+                level_extras={"max_return": max_returns},
             )
 
             metrics = {
@@ -824,6 +1021,16 @@ def main(config=None, project="JAXUED_TEST"):
             """
             This mutates the previous batch of replay levels and potentially adds them to the level buffer.
             This also updates the policy iff `config["exploratory_grad_updates"]` is True.
+
+            Tensor trace:
+                parent_levels leaves: (N, ...)
+                child_levels leaves: (N, ...)
+                init_obs/init_env_state leaves: (N, ...)
+                rollout obs leaves: (T, N, ...)
+                rollout actions/rewards/dones/log_probs/values: (T, N)
+                advantages/targets: (T, N)
+                max_returns/scores: (N,)
+                losses leaves: (E, M)
             """
             sampler = train_state.sampler
             rng, rng_mutate, rng_reset = jax.random.split(rng, 3)
@@ -867,13 +1074,10 @@ def main(config=None, project="JAXUED_TEST"):
                 dones,
             )
             max_returns = compute_max_returns(dones, rewards)
-            scores = compute_score(config, dones, values, max_returns, advantages)
-            sampler, _ = level_sampler.insert_batch(
-                sampler, child_levels, scores, {"max_return": max_returns}
-            )
 
-            # Update: train_state only modified if exploratory_grad_updates is on
-            (rng, train_state), losses = update_actor_critic_rnn(
+            # Update first (with optional grad norm computation)
+            compute_grads = config["score_function"] == "abs_pg"
+            (rng, train_state), (losses, grad_norms) = update_actor_critic_rnn(
                 rng,
                 train_state,
                 ActorCritic.initialize_carry((config["num_train_envs"],)),
@@ -886,6 +1090,20 @@ def main(config=None, project="JAXUED_TEST"):
                 config["entropy_coeff"],
                 config["critic_coeff"],
                 update_grad=config["exploratory_grad_updates"],
+                compute_per_step_grads=compute_grads,
+            )
+
+            # Then compute scores (using grad_norms if available)
+            scores = compute_score(
+                config,
+                dones,
+                values,
+                max_returns,
+                advantages,
+                grad_norms=grad_norms,
+            )
+            sampler, _ = level_sampler.insert_batch(
+                sampler, child_levels, scores, {"max_return": max_returns}
             )
 
             metrics = {
@@ -932,6 +1150,20 @@ def main(config=None, project="JAXUED_TEST"):
         """
         This evaluates the current policy on the set of evaluation levels specified by config["eval_levels"].
         It returns (states, cum_rewards, episode_lengths), with shapes (num_steps, num_eval_levels, ...), (num_eval_levels,), (num_eval_levels,)
+
+        Shape legend:
+            T_eval = env_params.max_steps_in_episode
+            L = len(config["eval_levels"])
+
+        Tensor trace:
+            levels leaves: (L, ...)
+            init_obs/init_env_state leaves: (L, ...)
+            evaluate_rnn outputs:
+                states leaves: (T_eval, L, ...)
+                rewards: (T_eval, L)
+                episode_lengths: (L,)
+            mask: (T_eval, L)
+            cum_rewards: (L,)
         """
         rng, rng_reset = jax.random.split(rng)
         levels = Level.load_prefabs(config["eval_levels"])
@@ -962,6 +1194,26 @@ def main(config=None, project="JAXUED_TEST"):
         """
         This function runs the train_step for a certain number of iterations, and then evaluates the policy.
         It returns the updated train state, and a dictionary of metrics.
+
+        Shape legend:
+            F = config["eval_freq"]
+            A = config["eval_num_attempts"]
+            L = len(config["eval_levels"])
+            T_eval = env_params.max_steps_in_episode
+
+        Loop tensor trace:
+            training scan over F updates:
+                metrics from `train_step` gain a leading axis F
+            evaluation vmap over A attempts:
+                states: (A, T_eval, L, ...)
+                cum_rewards: (A, L)
+                episode_lengths: (A, L)
+            aggregated eval stats:
+                eval_returns/eval_solve_rates: (L,)
+            visualization tensors:
+                first-attempt states: (T_eval, L, ...)
+                first-attempt episode_lengths: (L,)
+                frames: (T_eval, L, C, H, W)
         """
         # Train
         (rng, train_state), metrics = jax.lax.scan(
@@ -1145,7 +1397,11 @@ if __name__ == "__main__":
     group.add_argument("--critic_coeff", type=float, default=0.5)
     # === PLR ===
     group.add_argument(
-        "--score_function", type=str, default="MaxMC", choices=["MaxMC", "pvl"]
+        "--score_function",
+        type=str,
+        default="MaxMC",
+        choices=["MaxMC", "pvl", "abs_pg"],
+        help="Score function for level prioritization. abs_pg uses policy gradient magnitudes.",
     )
     group.add_argument(
         "--exploratory_grad_updates",
@@ -1163,6 +1419,13 @@ if __name__ == "__main__":
     )
     group.add_argument(
         "--buffer_duplicate_check", action=argparse.BooleanOptionalAction, default=True
+    )
+    group.add_argument(
+        "--pg_n_minibatch",
+        type=int,
+        default=1,
+        help="Number of env minibatches for policy gradient norm estimation. "
+             "Higher values reduce memory at the cost of sequential processing.",
     )
     # === ACCEL ===
     group.add_argument(

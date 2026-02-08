@@ -36,18 +36,13 @@ dependencies = [
     "distrax>=0.1.5",
     "wandb>=0.24.0",
     "ruff>=0.14.14",
-]
-
-[project.optional-dependencies]
-examples = [
-    "distrax",
     "optax",
     "orbax-checkpoint==0.5.3",
     "orbax",
-    "wandb",
     "pillow",
     "imageio",
-    "moviepy"
+    "moviepy",
+    "pytest>=8.4.2",
 ]
 
 [project.urls]
