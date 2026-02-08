@@ -903,7 +903,7 @@ def main(config=None, project="JAXUED_TEST"):
                 sampler=sampler,
                 levels=new_levels,
                 scores=scores,
-                extra={"max_return": max_returns},
+                level_extras={"max_return": max_returns},
             )
 
             metrics = {
