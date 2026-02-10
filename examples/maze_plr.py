@@ -1172,14 +1172,14 @@ def main(config=None, project="JAXUED_TEST"):
             jax.random.split(rng_reset, num_levels), levels, env_params
         )
         states, rewards, episode_lengths = evaluate_rnn(
-            rng,
-            eval_env,
-            env_params,
-            train_state,
-            ActorCritic.initialize_carry((num_levels,)),
-            init_obs,
-            init_env_state,
-            env_params.max_steps_in_episode,
+            rng = rng,
+            env = eval_env,
+            env_params = env_params,
+            train_state = train_state,
+            init_hstate = ActorCritic.initialize_carry((num_levels,)),
+            init_obs = init_obs,
+            init_env_state = init_env_state,
+            max_episode_length = env_params.max_steps_in_episode,
         )
         mask = jnp.arange(env_params.max_steps_in_episode)[..., None] < episode_lengths
         cum_rewards = (rewards * mask).sum(axis=0)
