@@ -29,7 +29,7 @@ maintainers = [
 ]
 dependencies = [
     "numpy",
-    "jax",
+    "jax[cuda12]",
     "flax",
     "chex",
     "gymnax",
