@@ -3,18 +3,12 @@
 Tests for ppo_value_loss in value_loss_utils.py.
 """
 
-import sys
-import os
-
-# Add examples/ to path so value_loss_utils can be imported directly
-sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "examples"))
-
 import jax.numpy as jnp
 
 
 def test_ppo_value_loss_shape() -> None:
     """Test ppo_value_loss returns correct (N,) shape."""
-    from value_loss_utils import ppo_value_loss
+    from examples.value_loss_utils import ppo_value_loss
 
     T, N = 10, 4
     values = jnp.ones((T, N))
@@ -27,7 +21,7 @@ def test_ppo_value_loss_shape() -> None:
 
 def test_ppo_value_loss_nonnegative() -> None:
     """Test that scores are always non-negative (squared error)."""
-    from value_loss_utils import ppo_value_loss
+    from examples.value_loss_utils import ppo_value_loss
 
     T, N = 8, 3
     values = jnp.array([[1.0, -2.0, 3.0]] * T)   # (T, N)
@@ -40,7 +34,7 @@ def test_ppo_value_loss_nonnegative() -> None:
 
 def test_ppo_value_loss_zero_when_perfect() -> None:
     """When values == targets, loss should be exactly zero."""
-    from value_loss_utils import ppo_value_loss
+    from examples.value_loss_utils import ppo_value_loss
 
     T, N = 5, 4
     values = jnp.ones((T, N)) * 3.0
@@ -65,7 +59,7 @@ def test_ppo_value_loss_known_value() -> None:
         env 0: (0.5 + 4.5) / 2 = 2.5
         env 1: (2.0 + 8.0) / 2 = 5.0
     """
-    from value_loss_utils import ppo_value_loss
+    from examples.value_loss_utils import ppo_value_loss
 
     values = jnp.array([[1.0, 2.0],
                          [3.0, 4.0]])
@@ -83,7 +77,7 @@ def test_ppo_value_loss_per_env_independence() -> None:
     Env 0 has zero error, env 1 has non-zero error.
     Changing env 1 should not affect env 0's score.
     """
-    from value_loss_utils import ppo_value_loss
+    from examples.value_loss_utils import ppo_value_loss
 
     T, N = 6, 2
     values = jnp.zeros((T, N))
@@ -101,7 +95,7 @@ def test_ppo_value_loss_per_env_independence() -> None:
 
 def test_ppo_value_loss_higher_error_higher_score() -> None:
     """Env with larger prediction error should get a higher score."""
-    from value_loss_utils import ppo_value_loss
+    from examples.value_loss_utils import ppo_value_loss
 
     T = 10
     # env 0: small error (off by 1), env 1: large error (off by 5)
@@ -118,7 +112,7 @@ def test_ppo_value_loss_higher_error_higher_score() -> None:
 
 def test_ppo_value_loss_single_step() -> None:
     """With T=1, mean over time is just the single step loss."""
-    from value_loss_utils import ppo_value_loss
+    from examples.value_loss_utils import ppo_value_loss
 
     values = jnp.array([[2.0, -3.0]])   # (1, 2)
     targets = jnp.array([[0.0, 0.0]])   # (1, 2)

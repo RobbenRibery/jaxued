@@ -639,7 +639,11 @@ def main(config=None, project="JAXUED_TEST"):
     else:
         tags.append("PLR")
     run = wandb.init(
-        config=config, project=project, group=config["run_name"], tags=tags
+        config=config,
+        project=project,
+        name=config["wandb_experiment_name"],
+        group=config["run_name"],
+        tags=tags,
     )
     config = wandb.config
 
@@ -1364,6 +1368,7 @@ if __name__ == "__main__":
     parser = argparse.ArgumentParser()
     parser.add_argument("--project", type=str, default="JAXUED_TEST")
     parser.add_argument("--run_name", type=str, default=None)
+    parser.add_argument("--wandb_experiment_name", type=str, default=None)
     parser.add_argument("--seed", type=int, default=0)
     # === Train vs Eval ===
     parser.add_argument("--mode", type=str, default="train")
