@@ -25,7 +25,6 @@ fi
 PROJECT_NAME="ued"
 SCORE_FUNCTION="pvl"
 WANDB_EXPERIMENT_NAME="${SCORE_FUNCTION}-seed${SEED}-walls${N_WALLS}"
-RUN_NAME="${WANDB_EXPERIMENT_NAME}"
 
 uv run -m examples.maze_plr \
     --score_function pvl \
@@ -41,7 +40,6 @@ uv run -m examples.maze_plr \
     --no-use_accel \
     --num_edits 5 \
     --project "${PROJECT_NAME}" \
-    --run_name "${RUN_NAME}" \
     --wandb_experiment_name "${WANDB_EXPERIMENT_NAME}" \
     --seed "$SEED" \
     --mode train \

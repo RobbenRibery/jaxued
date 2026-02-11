@@ -1,5 +1,6 @@
 import json
 import time
+import re
 from typing import Sequence, Tuple
 import numpy as np
 import jax
@@ -628,6 +629,13 @@ def compute_score(
         return ppo_value_loss(values, targets)
     else:
         raise ValueError(f"Unknown score function: {score_fn}")
+
+
+def normalize_run_name(name: str) -> str:
+    """Normalize an experiment/run name so it is safe as a checkpoint directory."""
+    normalized = re.sub(r"[^A-Za-z0-9._-]+", "-", name.strip())
+    normalized = re.sub(r"-{2,}", "-", normalized).strip("._-")
+    return normalized or "run"
 
 
 def main(config=None, project="JAXUED_TEST"):
@@ -1465,6 +1473,14 @@ if __name__ == "__main__":
             for key in sorted([a.dest for a in parser._action_groups[2]._group_actions])
         ]
     )
+    if config["wandb_experiment_name"] is None:
+        config["wandb_experiment_name"] = (
+            f"{config['score_function']}-seed{config['seed']}-walls{config['n_walls']}"
+        )
+    if config["run_name"] is None and config["mode"] == "train":
+        config["run_name"] = normalize_run_name(config["wandb_experiment_name"])
+    elif config["run_name"] is not None:
+        config["run_name"] = normalize_run_name(config["run_name"])
 
     if config["mode"] == "eval":
         os.environ["WANDB_MODE"] = "disabled"

@@ -1,6 +1,7 @@
 import os
 import json
 import time
+import re
 from typing import Sequence, Tuple
 import numpy as np
 import jax
@@ -439,10 +440,18 @@ def compute_score(config, dones, values, max_returns, advantages):
         raise ValueError(f"Unknown score function: {config['score_function']}")
 
 
+def normalize_run_name(name: str) -> str:
+    """Normalize an experiment/run name so it is safe as a checkpoint directory."""
+    normalized = re.sub(r"[^A-Za-z0-9._-]+", "-", name.strip())
+    normalized = re.sub(r"-{2,}", "-", normalized).strip("._-")
+    return normalized or "run"
+
+
 def main(config=None, project="JAXUED_TEST"):
     run = wandb.init(
         config=config,
         project=project,
+        name=config["wandb_experiment_name"],
         group=config["group_name"],
         tags=[
             "DR",
@@ -774,7 +783,13 @@ if __name__ == "__main__":
 
     parser = argparse.ArgumentParser()
     parser.add_argument("--project", type=str, default="JAXUED_TEST")
-    parser.add_argument("--run_name", type=str, default=None)
+    parser.add_argument(
+        "--run_name",
+        type=str,
+        default=None,
+        help="Checkpoint run identifier. Auto-generated from experiment name in train mode if omitted.",
+    )
+    parser.add_argument("--wandb_experiment_name", type=str, default=None)
     parser.add_argument("--seed", type=int, default=0)
     # === Train vs Eval ===
     parser.add_argument("--mode", type=str, default="train")
@@ -832,6 +847,14 @@ if __name__ == "__main__":
             for key in sorted([a.dest for a in parser._action_groups[2]._group_actions])
         ]
     )
+    if config["wandb_experiment_name"] is None:
+        config["wandb_experiment_name"] = (
+            f"maze_dr-seed{config['seed']}-walls{config['n_walls']}"
+        )
+    if config["run_name"] is None and config["mode"] == "train":
+        config["run_name"] = normalize_run_name(config["wandb_experiment_name"])
+    elif config["run_name"] is not None:
+        config["run_name"] = normalize_run_name(config["run_name"])
 
     if config["mode"] == "eval":
         os.environ["WANDB_MODE"] = "disabled"
