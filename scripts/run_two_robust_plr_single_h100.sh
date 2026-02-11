@@ -2,7 +2,7 @@
 # Run two robust-PLR training scripts concurrently on one GPU with per-process JAX memory caps.
 #
 # Usage:
-#   MEM_FRAC1=0.45 MEM_FRAC2=0.45 SEED1=0 SEED2=1 N_WALLS1=60 N_WALLS2=60 \
+#   MEM_FRAC1=0.45 MEM_FRAC2=0.45 SEED=0 N_WALLS1=60 N_WALLS2=60 \
 #   ./scripts/run_two_robust_plr_single_h100.sh [script1] [script2]
 #
 # Defaults:
@@ -11,8 +11,8 @@
 #   GPU_ID: 0
 #   MEM_FRAC1: 0.45
 #   MEM_FRAC2: 0.45
-#   SEED1: 0
-#   SEED2: 1
+#   SEED: 0 (shared by both jobs)
+#   SEED1/SEED2: optional legacy aliases; must match each other/SEED if set
 #   N_WALLS1: 60
 #   N_WALLS2: 60
 #   XLA_PYTHON_CLIENT_PREALLOCATE: true
@@ -24,8 +24,11 @@ SCRIPT2="${2:-scripts/train_pvl_robust_plr.sh}"
 GPU_ID="${GPU_ID:-0}"
 MEM_FRAC1="${MEM_FRAC1:-0.45}"
 MEM_FRAC2="${MEM_FRAC2:-0.45}"
-SEED1="${SEED1:-0}"
-SEED2="${SEED2:-1}"
+if [ -n "${SEED+x}" ]; then
+    SHARED_SEED="$SEED"
+else
+    SHARED_SEED="${SEED1:-${SEED2:-0}}"
+fi
 N_WALLS1="${N_WALLS1:-60}"
 N_WALLS2="${N_WALLS2:-60}"
 PREALLOCATE="${XLA_PYTHON_CLIENT_PREALLOCATE:-true}"
@@ -46,12 +49,20 @@ if ! is_nonneg_int "$GPU_ID"; then
     echo "Error: GPU_ID must be a non-negative integer, got '$GPU_ID'." >&2
     exit 1
 fi
-if ! is_nonneg_int "$SEED1"; then
-    echo "Error: SEED1 must be a non-negative integer, got '$SEED1'." >&2
+if [ -n "${SEED1+x}" ] && [ -n "${SEED2+x}" ] && [ "$SEED1" != "$SEED2" ]; then
+    echo "Error: SEED1 and SEED2 must match for parallel runs." >&2
     exit 1
 fi
-if ! is_nonneg_int "$SEED2"; then
-    echo "Error: SEED2 must be a non-negative integer, got '$SEED2'." >&2
+if [ -n "${SEED+x}" ] && [ -n "${SEED1+x}" ] && [ "$SEED" != "$SEED1" ]; then
+    echo "Error: SEED and SEED1 must match when both are set." >&2
+    exit 1
+fi
+if [ -n "${SEED+x}" ] && [ -n "${SEED2+x}" ] && [ "$SEED" != "$SEED2" ]; then
+    echo "Error: SEED and SEED2 must match when both are set." >&2
+    exit 1
+fi
+if ! is_nonneg_int "$SHARED_SEED"; then
+    echo "Error: SEED must be a non-negative integer, got '$SHARED_SEED'." >&2
     exit 1
 fi
 if ! is_nonneg_int "$N_WALLS1"; then
@@ -74,19 +85,19 @@ fi
 mkdir -p logs
 NAME1="$(basename "$SCRIPT1" .sh)"
 NAME2="$(basename "$SCRIPT2" .sh)"
-LOG1="logs/${NAME1}_seed${SEED1}_walls${N_WALLS1}.log"
-LOG2="logs/${NAME2}_seed${SEED2}_walls${N_WALLS2}.log"
+LOG1="logs/${NAME1}_seed${SHARED_SEED}_walls${N_WALLS1}.log"
+LOG2="logs/${NAME2}_seed${SHARED_SEED}_walls${N_WALLS2}.log"
 
 echo "Launching on GPU $GPU_ID"
-echo "job1: $SCRIPT1 seed=$SEED1 n_walls=$N_WALLS1 mem_frac=$MEM_FRAC1 preallocate=$PREALLOCATE"
-echo "job2: $SCRIPT2 seed=$SEED2 n_walls=$N_WALLS2 mem_frac=$MEM_FRAC2 preallocate=$PREALLOCATE"
+echo "job1: $SCRIPT1 seed=$SHARED_SEED n_walls=$N_WALLS1 mem_frac=$MEM_FRAC1 preallocate=$PREALLOCATE"
+echo "job2: $SCRIPT2 seed=$SHARED_SEED n_walls=$N_WALLS2 mem_frac=$MEM_FRAC2 preallocate=$PREALLOCATE"
 echo "logs: $LOG1"
 echo "logs: $LOG2"
 
 CUDA_VISIBLE_DEVICES="$GPU_ID" \
 XLA_PYTHON_CLIENT_MEM_FRACTION="$MEM_FRAC1" \
 XLA_PYTHON_CLIENT_PREALLOCATE="$PREALLOCATE" \
-SEED="$SEED1" \
+SEED="$SHARED_SEED" \
 N_WALLS="$N_WALLS1" \
 bash "$SCRIPT1" >"$LOG1" 2>&1 &
 PID1=$!
@@ -94,7 +105,7 @@ PID1=$!
 CUDA_VISIBLE_DEVICES="$GPU_ID" \
 XLA_PYTHON_CLIENT_MEM_FRACTION="$MEM_FRAC2" \
 XLA_PYTHON_CLIENT_PREALLOCATE="$PREALLOCATE" \
-SEED="$SEED2" \
+SEED="$SHARED_SEED" \
 N_WALLS="$N_WALLS2" \
 bash "$SCRIPT2" >"$LOG2" 2>&1 &
 PID2=$!
