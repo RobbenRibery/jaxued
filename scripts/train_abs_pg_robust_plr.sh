@@ -14,7 +14,7 @@ uv run -m examples.maze_plr \
     --buffer_duplicate_check \
     --no-use_accel \
     --num_edits 5 \
-    --project maze_plr_robust_abs_pg \
+    --project maze_plr_robust_maxmc \
     --seed 0 \
     --mode train \
     --checkpoint_save_interval 2 \

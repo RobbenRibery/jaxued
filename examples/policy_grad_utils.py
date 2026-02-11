@@ -290,10 +290,10 @@ def _process_env_chunk(
     dones_t = jnp.swapaxes(dones_c, 0, 1)    # (B_pg, T)
     actions_t = jnp.swapaxes(actions_c, 0, 1)  # (B_pg, T)
     advs_t = jnp.swapaxes(advs_c, 0, 1)      # (B_pg, T)
-    jax.debug.print(
-        "_process_env_chunk: dones_t={dt} actions_t={at} advs_t={avt}",
-        dt=dones_t.shape, at=actions_t.shape, avt=advs_t.shape,
-    )
+    #jax.debug.print(
+    #    "_process_env_chunk: dones_t={dt} actions_t={at} advs_t={avt}",
+    #    dt=dones_t.shape, at=actions_t.shape, avt=advs_t.shape,
+    #)
 
     # vmap grad_per_environment over B_pg envs (axis 0).
     # Each call receives: obs_n (T, ...), dones_n (T,), ..., hstate_n (...).
