@@ -38,6 +38,7 @@ import chex
 from enum import IntEnum
 from typing import Optional, Dict, Any
 from .policy_grad_utils import compute_raw_pg_grad_norms
+from .value_loss_utils import ppo_value_loss
 
 
 class UpdateState(IntEnum):
@@ -594,6 +595,7 @@ def compute_score(
     values: chex.Array,
     max_returns: chex.Array,
     advantages: chex.Array,
+    targets: Optional[chex.Array] = None,
     grad_norms: Optional[chex.Array] = None,
 ) -> chex.Array:
     """Compute level score based on configured score function.
@@ -604,6 +606,8 @@ def compute_score(
         values: Value estimates. Shape: (num_steps, num_envs).
         max_returns: Max return per env. Shape: (num_envs,).
         advantages: Advantage estimates. Shape: (num_steps, num_envs).
+        targets: GAE targets, i.e. advantages + values (for ppo_value_loss).
+            Shape: (num_steps, num_envs).
         grad_norms: Per-step, per-env gradient norms (for abs_pg).
             Shape: (num_steps, num_envs).
 
@@ -619,6 +623,9 @@ def compute_score(
     elif score_fn == "abs_pg":
         assert grad_norms is not None, "abs_pg requires grad_norms"
         return abs_policy_grad(dones, grad_norms)
+    elif score_fn == "ppo_value_loss":
+        assert targets is not None, "ppo_value_loss requires targets"
+        return ppo_value_loss(values, targets)
     else:
         raise ValueError(f"Unknown score function: {score_fn}")
 
@@ -632,7 +639,11 @@ def main(config=None, project="JAXUED_TEST"):
     else:
         tags.append("PLR")
     run = wandb.init(
-        config=config, project=project, group=config["run_name"], tags=tags
+        config=config,
+        project=project,
+        name=config["wandb_experiment_name"],
+        group=config["run_name"],
+        tags=tags,
     )
     config = wandb.config
 
@@ -897,6 +908,7 @@ def main(config=None, project="JAXUED_TEST"):
                 values=values,
                 max_returns=max_returns,
                 advantages=advantages,
+                targets=targets,
                 grad_norms=grad_norms,
             )
             sampler, _ = level_sampler.insert_batch(
@@ -990,11 +1002,12 @@ def main(config=None, project="JAXUED_TEST"):
 
             # Then compute scores (using grad_norms if available)
             scores = compute_score(
-                config = config,
+                config=config,
                 dones=dones,
                 values=values,
                 max_returns=max_returns,
                 advantages=advantages,
+                targets=targets,
                 grad_norms=grad_norms,
             )
             sampler = level_sampler.update_batch(
@@ -1096,10 +1109,11 @@ def main(config=None, project="JAXUED_TEST"):
             # Then compute scores (using grad_norms if available)
             scores = compute_score(
                 config,
-                dones,
-                values,
-                max_returns,
-                advantages,
+                dones=dones,
+                values=values,
+                max_returns=max_returns,
+                advantages=advantages,
+                targets=targets,
                 grad_norms=grad_norms,
             )
             sampler, _ = level_sampler.insert_batch(
@@ -1354,6 +1368,7 @@ if __name__ == "__main__":
     parser = argparse.ArgumentParser()
     parser.add_argument("--project", type=str, default="JAXUED_TEST")
     parser.add_argument("--run_name", type=str, default=None)
+    parser.add_argument("--wandb_experiment_name", type=str, default=None)
     parser.add_argument("--seed", type=int, default=0)
     # === Train vs Eval ===
     parser.add_argument("--mode", type=str, default="train")
@@ -1400,8 +1415,10 @@ if __name__ == "__main__":
         "--score_function",
         type=str,
         default="MaxMC",
-        choices=["MaxMC", "pvl", "abs_pg"],
-        help="Score function for level prioritization. abs_pg uses policy gradient magnitudes.",
+        choices=["MaxMC", "pvl", "abs_pg", "ppo_value_loss"],
+        help="Score function for level prioritization. "
+             "abs_pg uses policy gradient magnitudes. "
+             "ppo_value_loss uses PPO clipped value loss magnitude.",
     )
     group.add_argument(
         "--exploratory_grad_updates",

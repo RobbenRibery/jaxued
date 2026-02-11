@@ -1,5 +1,31 @@
 #!/bin/bash
 # Train maze PLR with MaxMC scoring function (default)
+#
+# Usage:
+#   SEED=3 N_WALLS=60 ./scripts/train_maxmc_robust_plr.sh [seed] [n_walls] [extra args...]
+# Positional integers (if provided) take precedence over env vars.
+SEED="${SEED:-0}"
+if [ $# -gt 0 ] && [[ "$1" =~ ^[0-9]+$ ]]; then
+    SEED="$1"
+    shift
+fi
+N_WALLS="${N_WALLS:-60}"
+if [ $# -gt 0 ] && [[ "$1" =~ ^[0-9]+$ ]]; then
+    N_WALLS="$1"
+    shift
+fi
+if ! [[ "${SEED}" =~ ^[0-9]+$ ]]; then
+    echo "Error: seed must be a non-negative integer, got '${SEED}'." >&2
+    exit 1
+fi
+if ! [[ "${N_WALLS}" =~ ^[0-9]+$ ]]; then
+    echo "Error: n_walls must be a non-negative integer, got '${N_WALLS}'." >&2
+    exit 1
+fi
+PROJECT_NAME="ued"
+SCORE_FUNCTION="MaxMC"
+WANDB_EXPERIMENT_NAME="${SCORE_FUNCTION}-seed${SEED}-walls${N_WALLS}"
+RUN_NAME="${WANDB_EXPERIMENT_NAME}"
 
 uv run -m examples.maze_plr \
     --score_function MaxMC \
@@ -14,8 +40,10 @@ uv run -m examples.maze_plr \
     --buffer_duplicate_check \
     --no-use_accel \
     --num_edits 5 \
-    --project maze_plr_robust_maxmc \
-    --seed 0 \
+    --project "${PROJECT_NAME}" \
+    --run_name "${RUN_NAME}" \
+    --wandb_experiment_name "${WANDB_EXPERIMENT_NAME}" \
+    --seed "$SEED" \
     --mode train \
     --checkpoint_save_interval 2 \
     --max_number_of_checkpoints 60 \
@@ -35,4 +63,5 @@ uv run -m examples.maze_plr \
     --entropy_coeff 1e-3 \
     --critic_coeff 0.5 \
     --agent_view_size 5 \
-    --n_walls 25
+    --n_walls "$N_WALLS" \
+    "$@"

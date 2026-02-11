@@ -3,12 +3,6 @@
 Tests for compute_grad_norm, abs_policy_grad, and raw policy gradient norm computation.
 """
 
-import sys
-import os
-
-# Add examples/ to path so policy_grad_utils can be imported directly
-sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "examples"))
-
 import jax
 import jax.numpy as jnp
 import distrax
@@ -101,7 +95,7 @@ def _make_mock_apply_fn_and_params(obs_dim: int = 3, action_dim: int = 2):
 
 def test_raw_pg_loss_single() -> None:
     """Verify raw PG loss equals -log_prob * advantage."""
-    from policy_grad_utils import raw_pg_loss_single
+    from examples.policy_grad_utils import raw_pg_loss_single
 
     apply_fn, params, obs_dim, action_dim = _make_mock_apply_fn_and_params()
 
@@ -129,7 +123,7 @@ def test_raw_pg_loss_single() -> None:
 
 def test_raw_pg_grad_norm_single_nonzero() -> None:
     """Verify grad norm is positive for non-zero advantage."""
-    from policy_grad_utils import raw_pg_grad_norm_single
+    from examples.policy_grad_utils import raw_pg_grad_norm_single
 
     apply_fn, params, obs_dim, _ = _make_mock_apply_fn_and_params()
 
@@ -148,7 +142,7 @@ def test_raw_pg_grad_norm_single_nonzero() -> None:
 
 def test_zero_advantage_zero_grad() -> None:
     """When advantage is zero, gradient norm should be zero."""
-    from policy_grad_utils import raw_pg_grad_norm_single
+    from examples.policy_grad_utils import raw_pg_grad_norm_single
 
     apply_fn, params, obs_dim, _ = _make_mock_apply_fn_and_params()
 
@@ -167,7 +161,7 @@ def test_zero_advantage_zero_grad() -> None:
 
 def test_grad_per_timestep_shape() -> None:
     """Verify grad_per_timestep returns (N,) shape."""
-    from policy_grad_utils import grad_per_timestep
+    from examples.policy_grad_utils import grad_per_timestep
 
     apply_fn, params, obs_dim, _ = _make_mock_apply_fn_and_params()
     N = 4
@@ -188,7 +182,7 @@ def test_grad_per_timestep_shape() -> None:
 
 def test_grad_per_environment_shape() -> None:
     """Verify grad_per_environment returns (T,) shape."""
-    from policy_grad_utils import grad_per_environment
+    from examples.policy_grad_utils import grad_per_environment
 
     apply_fn, params, obs_dim, _ = _make_mock_apply_fn_and_params()
     T = 5
@@ -209,7 +203,7 @@ def test_grad_per_environment_shape() -> None:
 
 def test_compute_raw_pg_grad_norms_shape() -> None:
     """Verify compute_raw_pg_grad_norms returns (T, N) shape."""
-    from policy_grad_utils import compute_raw_pg_grad_norms
+    from examples.policy_grad_utils import compute_raw_pg_grad_norms
 
     apply_fn, params, obs_dim, _ = _make_mock_apply_fn_and_params()
     T, N = 5, 4
@@ -230,7 +224,7 @@ def test_compute_raw_pg_grad_norms_shape() -> None:
 
 def test_compute_raw_pg_grad_norms_minibatch_equivalence() -> None:
     """Verify pg_n_minibatch=1 and pg_n_minibatch=N produce the same result."""
-    from policy_grad_utils import compute_raw_pg_grad_norms
+    from examples.policy_grad_utils import compute_raw_pg_grad_norms
 
     apply_fn, params, obs_dim, _ = _make_mock_apply_fn_and_params()
     T, N = 5, 4
@@ -264,7 +258,7 @@ def test_compute_raw_pg_grad_norms_minibatch_equivalence() -> None:
 
 def test_reduced_mean_functions() -> None:
     """Verify reduction functions produce correct shapes and values."""
-    from policy_grad_utils import (
+    from examples.policy_grad_utils import (
         reduced_mean_over_envs,
         reduced_mean_over_time,
         reduced_mean_grad,

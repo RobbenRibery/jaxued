@@ -193,8 +193,8 @@ def abs_policy_grad(
         Mean gradient norm per environment. Shape: (num_envs,).
     """
     mean_scores, _, episode_count = accumulate_rollout_stats(
-        dones=dones, 
-        metrics=grad_norms, 
+        dones=dones,
+        metrics=grad_norms,
         time_average=True,
     )
     return jnp.where(episode_count > 0, mean_scores, incomplete_value)
