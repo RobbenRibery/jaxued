@@ -32,13 +32,13 @@ from jaxued.utils import (
     max_mc,
     positive_value_loss,
     abs_policy_grad,
-    ppo_value_loss,
 )
 from jaxued.wrappers import AutoReplayWrapper
 import chex
 from enum import IntEnum
 from typing import Optional, Dict, Any
 from .policy_grad_utils import compute_raw_pg_grad_norms
+from .value_loss_utils import ppo_value_loss
 
 
 class UpdateState(IntEnum):
@@ -601,7 +601,7 @@ def compute_score(
     """Compute level score based on configured score function.
 
     Args:
-        config: Configuration dict with 'score_function' and 'clip_eps' keys.
+        config: Configuration dict with 'score_function' key.
         dones: Episode done flags. Shape: (num_steps, num_envs).
         values: Value estimates. Shape: (num_steps, num_envs).
         max_returns: Max return per env. Shape: (num_envs,).
@@ -625,7 +625,7 @@ def compute_score(
         return abs_policy_grad(dones, grad_norms)
     elif score_fn == "ppo_value_loss":
         assert targets is not None, "ppo_value_loss requires targets"
-        return ppo_value_loss(values, targets, clip_eps=config["clip_eps"])
+        return ppo_value_loss(values, targets)
     else:
         raise ValueError(f"Unknown score function: {score_fn}")
 
