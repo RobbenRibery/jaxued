@@ -1,8 +1,8 @@
 #!/bin/bash
-# Train maze PLR with Positive Value Loss (pvl) scoring function
+# Train maze PLR with MaxMC scoring function (default)
 #
 # Usage:
-#   SEED=3 N_WALLS=60 ./scripts/train_pvl_robust_plr.sh [seed] [n_walls] [extra args...]
+#   SEED=3 N_WALLS=60 ./scripts/train_robust_plr_maxmc.sh [seed] [n_walls] [extra args...]
 # Positional integers (if provided) take precedence over env vars.
 SEED="${SEED:-0}"
 if [ $# -gt 0 ] && [[ "$1" =~ ^[0-9]+$ ]]; then
@@ -23,11 +23,12 @@ if ! [[ "${N_WALLS}" =~ ^[0-9]+$ ]]; then
     exit 1
 fi
 PROJECT_NAME="ued"
-SCORE_FUNCTION="pvl"
-WANDB_EXPERIMENT_NAME="${SCORE_FUNCTION}-seed${SEED}-walls${N_WALLS}"
+SCORE_FUNCTION="MaxMC"
+METHOD_NAME="robust_plr"
+WANDB_EXPERIMENT_NAME="${METHOD_NAME}-maxmc-seed${SEED}-walls${N_WALLS}"
 
 uv run -m examples.maze_plr \
-    --score_function pvl \
+    --score_function MaxMC \
     --no-exploratory_grad_updates \
     --level_buffer_capacity 4000 \
     --replay_prob 0.8 \

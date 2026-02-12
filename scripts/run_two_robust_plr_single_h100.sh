@@ -6,8 +6,8 @@
 #   ./scripts/run_two_robust_plr_single_h100.sh [script1] [script2]
 #
 # Defaults:
-#   script1: scripts/train_maxmc_robust_plr.sh
-#   script2: scripts/train_pvl_robust_plr.sh
+#   script1: scripts/train_robust_plr_maxmc.sh
+#   script2: scripts/train_robust_plr_pvl.sh
 #   GPU_ID: 0
 #   MEM_FRAC1: 0.45
 #   MEM_FRAC2: 0.45
@@ -19,8 +19,8 @@
 
 set -uo pipefail
 
-SCRIPT1="${1:-scripts/train_maxmc_robust_plr.sh}"
-SCRIPT2="${2:-scripts/train_pvl_robust_plr.sh}"
+SCRIPT1="${1:-scripts/train_robust_plr_maxmc.sh}"
+SCRIPT2="${2:-scripts/train_robust_plr_pvl.sh}"
 GPU_ID="${GPU_ID:-0}"
 MEM_FRAC1="${MEM_FRAC1:-0.45}"
 MEM_FRAC2="${MEM_FRAC2:-0.45}"

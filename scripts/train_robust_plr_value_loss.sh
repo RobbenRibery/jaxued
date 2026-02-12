@@ -1,8 +1,8 @@
 #!/bin/bash
-# Train maze PLR with absolute policy gradient scoring function
+# Train maze PLR with PPO value loss scoring function
 #
 # Usage:
-#   SEED=3 N_WALLS=60 ./scripts/train_abs_pg_robust_plr.sh [seed] [n_walls] [extra args...]
+#   SEED=3 N_WALLS=60 ./scripts/train_robust_plr_value_loss.sh [seed] [n_walls] [extra args...]
 # Positional integers (if provided) take precedence over env vars.
 SEED="${SEED:-0}"
 if [ $# -gt 0 ] && [[ "$1" =~ ^[0-9]+$ ]]; then
@@ -23,11 +23,12 @@ if ! [[ "${N_WALLS}" =~ ^[0-9]+$ ]]; then
     exit 1
 fi
 PROJECT_NAME="ued"
-SCORE_FUNCTION="abs_pg"
-WANDB_EXPERIMENT_NAME="${SCORE_FUNCTION}-seed${SEED}-walls${N_WALLS}"
+SCORE_FUNCTION="ppo_value_loss"
+METHOD_NAME="robust_plr"
+WANDB_EXPERIMENT_NAME="${METHOD_NAME}-value_loss-seed${SEED}-walls${N_WALLS}"
 
 uv run -m examples.maze_plr \
-    --score_function abs_pg \
+    --score_function ppo_value_loss \
     --no-exploratory_grad_updates \
     --level_buffer_capacity 4000 \
     --replay_prob 0.8 \
