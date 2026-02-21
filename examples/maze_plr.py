@@ -1941,7 +1941,7 @@ if __name__ == "__main__":
     group.add_argument(
         "--sin_eps",
         type=float,
-        default=1e-6,
+        default=1e-8,
         help="Numerical stabilizer for normalized s_in score.",
     )
     group.add_argument(
