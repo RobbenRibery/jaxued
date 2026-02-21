@@ -2,7 +2,7 @@ import jax
 import jax.flatten_util
 import jax.numpy as jnp
 import chex
-from typing import Tuple
+from typing import Any, Callable, Dict, Tuple
 
 # This file is a modified version of
 # https://github.com/facebookresearch/minimax/blob/2ae9e04d37f97d7c14308f5a26237dcfca63470f/src/minimax/util/rl/ued_scores.py.
@@ -11,6 +11,10 @@ from typing import Tuple
 # Type aliases for accumulate_rollout_stats scan function
 _Carry = Tuple[chex.Array, chex.Array, chex.Array, chex.Array, chex.Array]
 _Input = Tuple[chex.Array, chex.Array]
+LossFn = Callable[[chex.ArrayTree, Any], chex.Array]
+VirtualUpdateFn = Callable[
+    [chex.PRNGKey, chex.ArrayTree, Any], Tuple[chex.PRNGKey, chex.ArrayTree]
+]
 
 
 def accumulate_rollout_stats(
@@ -198,3 +202,117 @@ def abs_policy_grad(
         time_average=True,
     )
     return jnp.where(episode_count > 0, mean_scores, incomplete_value)
+
+
+def rnn_value_mse_loss(
+    apply_fn: Callable[..., Tuple[chex.ArrayTree, Any, chex.Array]],
+    params: chex.ArrayTree,
+    eval_batch: Tuple[chex.ArrayTree, chex.Array, chex.Array, chex.ArrayTree],
+) -> chex.Array:
+    """Compute per-environment value MSE for RNN actor-critic models.
+
+    Args:
+        apply_fn: Model apply function returning (_, policy_dist, values).
+        params: Model parameters.
+        eval_batch: (obs, last_dones, targets, init_hstate), where:
+            obs leaves have shape (T, B, ...),
+            last_dones has shape (T, B),
+            targets has shape (T, B),
+            init_hstate leaves have shape (B, ...).
+
+    Returns:
+        Per-environment value MSE. Shape: (B,).
+    """
+    obs, last_dones, targets, init_hstate = eval_batch
+    _, _, values_pred = apply_fn(params, (obs, last_dones), init_hstate)
+    per_step_loss = 0.5 * (values_pred - targets) ** 2
+    return per_step_loss.mean(axis=0)
+
+
+def s_in_from_losses(
+    loss_before: chex.Array,
+    loss_after: chex.Array,
+    eps: float = 1e-6,
+) -> chex.Array:
+    """Compute normalized holdout learning progress score.
+
+    S_in = (L_before - L_after) / (L_before + eps)
+
+    Args:
+        loss_before: Loss before virtual updates. Shape: (B,) or ().
+        loss_after: Loss after virtual updates. Shape: (B,) or ().
+        eps: Positive stabilizer for denominator.
+
+    Returns:
+        Normalized learning progress score. Shape matches inputs.
+    """
+    return (loss_before - loss_after) / (loss_before + eps)
+
+
+def run_k_virtual_updates(
+    rng: chex.PRNGKey,
+    params: chex.ArrayTree,
+    update_batch: Any,
+    virtual_update_fn: VirtualUpdateFn,
+    n_virtual_updates: int,
+) -> Tuple[chex.PRNGKey, chex.ArrayTree]:
+    """Apply a virtual update rule K times.
+
+    Args:
+        rng: PRNG key.
+        params: Starting parameters.
+        update_batch: Batch used for each virtual update.
+        virtual_update_fn: One-step virtual update function.
+        n_virtual_updates: Number of virtual updates K.
+
+    Returns:
+        Tuple of (rng, updated_params) after K steps.
+    """
+
+    def _body(_, carry):
+        rng_curr, params_curr = carry
+        return virtual_update_fn(rng_curr, params_curr, update_batch)
+
+    return jax.lax.fori_loop(0, n_virtual_updates, _body, (rng, params))
+
+
+def measure_s_in(
+    rng: chex.PRNGKey,
+    params: chex.ArrayTree,
+    update_batch: Any,
+    eval_batch: Any,
+    loss_fn: LossFn,
+    virtual_update_fn: VirtualUpdateFn,
+    n_virtual_updates: int,
+    eps: float = 1e-6,
+) -> Tuple[chex.PRNGKey, chex.Array, Dict[str, chex.Array]]:
+    """Measure attainable holdout learning progress on eval_batch.
+
+    Args:
+        rng: PRNG key.
+        params: Base parameters theta.
+        update_batch: Virtual update data D_A.
+        eval_batch: Holdout evaluation data D_B.
+        loss_fn: Callable L(params, eval_batch) -> per-env loss.
+        virtual_update_fn: Callable for one virtual update.
+        n_virtual_updates: Number of virtual updates K.
+        eps: Stabilizer for normalized reduction.
+
+    Returns:
+        (rng, s_in, diagnostics) where diagnostics has:
+            "loss_before": loss before K virtual updates
+            "loss_after": loss after K virtual updates
+    """
+    loss_before = loss_fn(params, eval_batch)
+    rng, params_k = run_k_virtual_updates(
+        rng=rng,
+        params=params,
+        update_batch=update_batch,
+        virtual_update_fn=virtual_update_fn,
+        n_virtual_updates=n_virtual_updates,
+    )
+    loss_after = loss_fn(params_k, eval_batch)
+    return rng, s_in_from_losses(loss_before, loss_after, eps=eps), {
+        "loss_before": loss_before,
+        "loss_after": loss_after,
+    }
