@@ -39,8 +39,8 @@ from jaxued.wrappers import AutoReplayWrapper
 import chex
 from enum import IntEnum
 from typing import Optional, Dict, Any
-from policy_grad_utils import compute_raw_pg_grad_norms
-from value_loss_utils import ppo_value_loss
+from examples.policy_grad_utils import compute_raw_pg_grad_norms
+from examples.value_loss_utils import ppo_value_loss
 
 
 class UpdateState(IntEnum):

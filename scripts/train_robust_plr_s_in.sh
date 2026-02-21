@@ -25,7 +25,7 @@ fi
 PROJECT_NAME="ued"
 SCORE_FUNCTION="s_in"
 METHOD_NAME="robust_plr"
-WANDB_EXPERIMENT_NAME="${METHOD_NAME}-s_in-seed${SEED}-walls${N_WALLS}"
+WANDB_EXPERIMENT_NAME="${METHOD_NAME}-s_in-seed${SEED}-walls${N_WALLS}-valuelossonly"
 
 uv run -m examples.maze_plr \
     --score_function s_in \
