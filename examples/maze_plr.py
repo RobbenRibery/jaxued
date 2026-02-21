@@ -730,7 +730,7 @@ def virtual_update_fn_for_s_in(
         init_hstate=init_hstate,
         batch=(obs, actions, dones, log_probs, values, targets, advantages),
         num_envs=1,
-        n_steps=obs.shape[0],
+        n_steps=actions.shape[0],
         n_minibatch=1,
         n_epochs=config["epoch_ppo"],
         clip_eps=config["clip_eps"],
