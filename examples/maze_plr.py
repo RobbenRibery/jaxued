@@ -861,26 +861,24 @@ def compute_s_in_scores(
         return jax.lax.dynamic_slice_in_dim(x, idx, 1, axis=0)
 
     def _per_level_score(
-        rng_carry: chex.PRNGKey, level_idx: chex.Array
-    ) -> tuple[chex.PRNGKey, tuple[chex.Array, chex.Array, chex.Array]]:
-        """Compute the S_in score for a single level, used as a ``jax.lax.scan`` body.
+        rng_level: chex.PRNGKey, level_idx: chex.Array
+    ) -> tuple[chex.Array, chex.Array, chex.Array]:
+        """Compute the S_in score for a single level.
 
         Builds the PPO update batch and value-loss eval batch for level ``level_idx``,
         then calls ``measure_s_in`` to estimate how much a virtual update on the update
         batch improves value-loss on the held-out eval batch.
 
         Args:
-            rng_carry: PRNG carry key threaded through the scan.
+            rng_level: PRNG key dedicated to this level.
             level_idx: Scalar integer index identifying which environment (level) to score.
 
         Returns:
-            (rng_carry, (s_in_i, loss_before_i, loss_after_i)):
+            (s_in_i, loss_before_i, loss_after_i):
                 s_in_i: Scalar S_in score for this level.
                 loss_before_i: Value loss on the eval batch before the virtual update.
                 loss_after_i: Value loss on the eval batch after the virtual update.
         """
-        rng_carry, rng_level = jax.random.split(rng_carry)
-
         update_batch_i = (
             jax.tree_util.tree_map(lambda x: _slice_time_env(x, level_idx), obs_a),
             _slice_time_env(actions_a, level_idx),
@@ -916,17 +914,26 @@ def compute_s_in_scores(
             n_virtual_updates=config["sin_n_virtual_updates"],
             eps=config["sin_eps"],
         )
-        return rng_level, (
+        return (
             jnp.ravel(s_in_i)[0],
             jnp.ravel(diagnostics_i["loss_before"])[0],
             jnp.ravel(diagnostics_i["loss_after"])[0],
         )
 
-    rng, (scores, loss_before, loss_after) = jax.lax.scan(
-        _per_level_score,
-        rng,
-        jnp.arange(num_envs, dtype=jnp.int32),
-    )
+    def _next_level_key(
+        rng_carry: chex.PRNGKey, _: None
+    ) -> tuple[chex.PRNGKey, chex.PRNGKey]:
+        # Preserve the exact RNG progression of the previous scan implementation so
+        # score values and downstream randomness remain behaviorally identical.
+        rng_carry, rng_level = jax.random.split(rng_carry)
+        return rng_carry, rng_level
+
+    # Generate per-level keys with the same sequence as before, then vectorize the
+    # expensive per-level S_in computation across levels for better throughput.
+    rng, rng_levels = jax.lax.scan(_next_level_key, rng, None, length=num_envs)
+    scores, loss_before, loss_after = jax.vmap(
+        _per_level_score, in_axes=(0, 0)
+    )(rng_levels, jnp.arange(num_envs, dtype=jnp.int32))
     return rng, scores, {
         "lp_s_in_mean": scores.mean(),
         "lp_loss_before_mean": loss_before.mean(),
