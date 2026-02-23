@@ -313,6 +313,7 @@ def update_actor_critic_rnn(
     critic_coeff: float,
     update_grad: bool = True,
     compute_per_step_grads: bool = False,
+    actor_coeff: float = 1.0,
 ) -> Tuple[
     Tuple[chex.PRNGKey, TrainState], Tuple[chex.ArrayTree, Optional[chex.Array]]
 ]:
@@ -338,6 +339,8 @@ def update_actor_critic_rnn(
         critic_coeff (float):
         update_grad (bool, optional): If False, the train state does not actually get updated. Defaults to True.
         compute_per_step_grads (bool, optional): If True, compute and return per-step gradient norms.
+        actor_coeff (float, optional): Weight for actor (policy gradient) loss. Set to 0 for
+            critic-only updates (e.g. S_in virtual updates). Defaults to 1.0.
 
     Returns:
         Tuple of ((rng, train_state), (losses, grad_norms)).
@@ -422,7 +425,7 @@ def update_actor_critic_rnn(
                     ).mean()
                 )
 
-                loss = l_clip + critic_coeff * l_vf - entropy_coeff * entropy
+                loss = actor_coeff * l_clip + critic_coeff * l_vf - entropy_coeff * entropy
 
                 return loss, (l_vf, l_clip, entropy)
 
@@ -699,7 +702,11 @@ def virtual_update_fn_for_s_in(
     train_state: TrainState,
     config: Dict[str, Any],
 ) -> tuple[chex.PRNGKey, chex.ArrayTree]:
-    """One virtual PPO update step on a single-level batch.
+    """One critic-only virtual update step on a single-level batch.
+
+    Uses critic loss only (actor_coeff=0, entropy_coeff=0) so that the virtual
+    parameter update targets value-function improvement without actor gradients
+    corrupting shared representations.
 
     Args:
         rng: PRNG key.
@@ -734,10 +741,11 @@ def virtual_update_fn_for_s_in(
         n_minibatch=1,
         n_epochs=config["epoch_ppo"],
         clip_eps=config["clip_eps"],
-        entropy_coeff=config["entropy_coeff"],
+        entropy_coeff=0.0,
         critic_coeff=config["critic_coeff"],
         update_grad=True,
         compute_per_step_grads=False,
+        actor_coeff=0.0,
     )
     return rng, virtual_train_state.params
 
