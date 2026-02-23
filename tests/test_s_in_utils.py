@@ -23,23 +23,51 @@ def test_run_k_virtual_updates_applies_k_steps() -> None:
     from jaxued.utils import run_k_virtual_updates
     import jax
 
-    def virtual_update_fn(rng, params, update_batch):
+    def virtual_update_fn(rng, state, update_batch):
         del rng
-        return jax.random.PRNGKey(0), params + update_batch
+        return jax.random.PRNGKey(0), state + update_batch
 
     rng = jax.random.PRNGKey(0)
-    params = jnp.array(0.0)
+    virtual_state = jnp.array(0.0)
     update_batch = jnp.array(1.0)
 
-    _, updated_params = run_k_virtual_updates(
+    _, updated_state = run_k_virtual_updates(
         rng=rng,
-        params=params,
+        virtual_state=virtual_state,
         update_batch=update_batch,
         virtual_update_fn=virtual_update_fn,
         n_virtual_updates=5,
     )
 
-    assert jnp.allclose(updated_params, 5.0), f"Expected 5.0, got {updated_params}"
+    assert jnp.allclose(updated_state, 5.0), f"Expected 5.0, got {updated_state}"
+
+
+def test_run_k_virtual_updates_carries_optimizer_like_state() -> None:
+    """Virtual updates must carry non-parameter state across K steps."""
+    from jaxued.utils import run_k_virtual_updates
+    import jax
+
+    def virtual_update_fn(rng, state, update_batch):
+        del rng
+        mom_next = state["mom"] + update_batch
+        param_next = state["param"] + mom_next
+        return jax.random.PRNGKey(0), {"param": param_next, "mom": mom_next}
+
+    rng = jax.random.PRNGKey(0)
+    state0 = {"param": jnp.array(0.0), "mom": jnp.array(0.0)}
+    update_batch = jnp.array(1.0)
+
+    _, state_k = run_k_virtual_updates(
+        rng=rng,
+        virtual_state=state0,
+        update_batch=update_batch,
+        virtual_update_fn=virtual_update_fn,
+        n_virtual_updates=3,
+    )
+
+    # If momentum is carried: mom = 3, param = 1 + 2 + 3 = 6
+    assert jnp.allclose(state_k["mom"], 3.0), state_k
+    assert jnp.allclose(state_k["param"], 6.0), state_k
 
 
 def test_measure_s_in_with_toy_functions() -> None:
@@ -47,22 +75,22 @@ def test_measure_s_in_with_toy_functions() -> None:
     from jaxued.utils import measure_s_in
     import jax
 
-    def loss_fn(params, eval_batch):
+    def loss_fn(state, eval_batch):
         target = eval_batch
-        return (params - target) ** 2
+        return (state["param"] - target) ** 2
 
-    def virtual_update_fn(rng, params, update_batch):
+    def virtual_update_fn(rng, state, update_batch):
         del update_batch
-        return rng, params - 0.5
+        return rng, {"param": state["param"] - 0.5, "mom": state["mom"] + 1.0}
 
     rng = jax.random.PRNGKey(123)
-    params = jnp.array(2.0)
+    virtual_state = {"param": jnp.array(2.0), "mom": jnp.array(0.0)}
     update_batch = jnp.array(0.0)
     eval_batch = jnp.array(0.0)
 
     _, score, diagnostics = measure_s_in(
         rng=rng,
-        params=params,
+        virtual_state=virtual_state,
         update_batch=update_batch,
         eval_batch=eval_batch,
         loss_fn=loss_fn,

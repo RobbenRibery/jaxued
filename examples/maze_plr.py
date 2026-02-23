@@ -1,7 +1,7 @@
 import json
 import time
 import re
-from typing import Callable, Sequence, Tuple
+from typing import Sequence, Tuple
 import numpy as np
 import jax
 import jax.numpy as jnp
@@ -34,7 +34,6 @@ from jaxued.utils import (
     max_mc,
     positive_value_loss,
     abs_policy_grad,
-    rnn_value_mse_loss,
 )
 from jaxued.wrappers import AutoReplayWrapper
 import chex
@@ -633,20 +632,33 @@ def compute_score(
         raise ValueError(f"Unknown score function: {score_fn}")
 
 
-def build_value_eval_batch_from_rollout(
+def build_ppo_eval_batch_from_rollout(
     obs: chex.ArrayTree,
+    actions: chex.Array,
     dones: chex.Array,
+    log_probs: chex.Array,
     rewards: chex.Array,
     values: chex.Array,
     last_value: chex.Array,
     gamma: float,
     gae_lambda: float,
-) -> tuple[chex.ArrayTree, chex.Array, chex.Array, chex.ArrayTree]:
-    """Build value-loss evaluation batch from a rollout.
+) -> tuple[
+    chex.ArrayTree,
+    chex.Array,
+    chex.Array,
+    chex.Array,
+    chex.Array,
+    chex.Array,
+    chex.Array,
+    chex.ArrayTree,
+]:
+    """Build PPO-loss evaluation batch from a rollout.
 
     Args:
         obs: Rollout observations. Shape leaves: (T, B, ...).
+        actions: Rollout actions. Shape: (T, B).
         dones: Rollout done flags. Shape: (T, B).
+        log_probs: Behavior log probs. Shape: (T, B).
         rewards: Rollout rewards. Shape: (T, B).
         values: Rollout value predictions. Shape: (T, B).
         last_value: Bootstrap value. Shape: (B,).
@@ -654,13 +666,18 @@ def build_value_eval_batch_from_rollout(
         gae_lambda: GAE lambda.
 
     Returns:
-        Tuple: (eval_obs, eval_last_dones, eval_targets, eval_init_hstate)
+        Tuple: (eval_obs, eval_actions, eval_last_dones, eval_log_probs, eval_values,
+                eval_targets, eval_advantages, eval_init_hstate)
             eval_obs leaves: (T, B, ...)
+            eval_actions: (T, B)
             eval_last_dones: (T, B)
+            eval_log_probs: (T, B)
+            eval_values: (T, B)
             eval_targets: (T, B)
+            eval_advantages: (T, B)
             eval_init_hstate leaves: (B, ...)
     """
-    _, targets = compute_gae(
+    advantages, targets = compute_gae(
         gamma=gamma,
         lambd=gae_lambda,
         last_value=last_value,
@@ -671,46 +688,97 @@ def build_value_eval_batch_from_rollout(
     last_dones = jnp.roll(dones, 1, axis=0).at[0].set(False)
     num_envs = values.shape[1]
     init_hstate = ActorCritic.initialize_carry((num_envs,))
-    return obs, last_dones, targets, init_hstate
+    return (
+        obs,
+        actions,
+        last_dones,
+        log_probs,
+        values,
+        targets,
+        advantages,
+        init_hstate,
+    )
 
 
-def value_loss_fn_for_s_in(
-    params: chex.ArrayTree,
-    eval_batch: tuple[chex.ArrayTree, chex.Array, chex.Array, chex.ArrayTree],
-    apply_fn: Callable[..., Tuple[chex.ArrayTree, Any, chex.Array]],
+def ppo_loss_fn_for_s_in(
+    virtual_train_state: TrainState,
+    eval_batch: tuple[
+        chex.ArrayTree,
+        chex.Array,
+        chex.Array,
+        chex.Array,
+        chex.Array,
+        chex.Array,
+        chex.Array,
+        chex.ArrayTree,
+    ],
+    config: Dict[str, Any],
 ) -> chex.Array:
-    """Compute per-level value loss used by S_in.
+    """Compute per-level PPO loss used by S_in.
 
     Args:
-        params: Model parameters.
-        eval_batch: (obs, last_dones, targets, init_hstate) with batch axis B.
-        apply_fn: Actor-critic apply function.
+        virtual_train_state: Virtual train state containing params and optimizer state.
+        eval_batch: (obs, actions, last_dones, log_probs, values, targets, advantages,
+            init_hstate) with batch axis B.
+        config: Training config containing clip/entropy/critic coefficients.
 
     Returns:
-        Per-level value loss. Shape: (B,).
+        Per-level PPO total loss. Shape: (B,).
     """
-    return rnn_value_mse_loss(apply_fn, params, eval_batch)
+    (
+        obs,
+        actions,
+        last_dones,
+        log_probs,
+        values,
+        targets,
+        advantages,
+        init_hstate,
+    ) = eval_batch
+
+    _, pi, values_pred = virtual_train_state.apply_fn(
+        virtual_train_state.params, (obs, last_dones), init_hstate
+    )
+    log_probs_pred = pi.log_prob(actions)
+
+    ratio = jnp.exp(log_probs_pred - log_probs)
+    adv_mean = advantages.mean(axis=0, keepdims=True)
+    adv_std = advantages.std(axis=0, keepdims=True)
+    adv_norm = (advantages - adv_mean) / (adv_std + 1e-5)
+    l_clip = -jnp.minimum(
+        ratio * adv_norm,
+        jnp.clip(ratio, 1 - config["clip_eps"], 1 + config["clip_eps"]) * adv_norm,
+    ).mean(axis=0)
+
+    values_pred_clipped = values + (values_pred - values).clip(
+        -config["clip_eps"], config["clip_eps"]
+    )
+    l_vf = 0.5 * jnp.maximum(
+        (values_pred - targets) ** 2,
+        (values_pred_clipped - targets) ** 2,
+    ).mean(axis=0)
+    entropy = pi.entropy().mean(axis=0)
+
+    return l_clip + config["critic_coeff"] * l_vf - config["entropy_coeff"] * entropy
 
 
 def virtual_update_fn_for_s_in(
     rng: chex.PRNGKey,
-    params: chex.ArrayTree,
+    virtual_train_state: TrainState,
     update_batch: tuple,
-    train_state: TrainState,
     config: Dict[str, Any],
-) -> tuple[chex.PRNGKey, chex.ArrayTree]:
+) -> tuple[chex.PRNGKey, TrainState]:
     """One virtual PPO update step on a single-level batch.
 
     Args:
         rng: PRNG key.
-        params: Current virtual parameters.
+        virtual_train_state: Current virtual train state (params + optimizer state).
         update_batch: (obs, actions, dones, log_probs, values, targets, advantages, init_hstate),
             where non-hidden arrays have shapes (T, 1, ...) and init_hstate leaves have shape (1, ...).
-        train_state: Base train state for optimizer/apply function.
         config: Training config.
 
     Returns:
-        (rng, updated_params) after one virtual update.
+        (rng, updated_virtual_train_state) after one virtual update.
     """
     (
         obs,
@@ -723,7 +791,6 @@ def virtual_update_fn_for_s_in(
         init_hstate,
     ) = update_batch
 
-    virtual_train_state = train_state.replace(params=params)
     (rng, virtual_train_state), _ = update_actor_critic_rnn(
         rng=rng,
         train_state=virtual_train_state,
@@ -739,7 +806,7 @@ def virtual_update_fn_for_s_in(
         update_grad=True,
         compute_per_step_grads=False,
     )
-    return rng, virtual_train_state.params
+    return rng, virtual_train_state
 
 
 def compute_s_in_scores(
@@ -804,10 +871,10 @@ def compute_s_in_scores(
     ) = rollout_a
     (
         obs_b,
-        _actions_b,
+        actions_b,
         rewards_b,
         dones_b,
-        _log_probs_b,
+        log_probs_b,
         values_b,
         last_value_b,
         _init_hstate_b,
@@ -821,9 +888,11 @@ def compute_s_in_scores(
         rewards=rewards_a,
         dones=dones_a,
     )
-    eval_batch_b = build_value_eval_batch_from_rollout(
+    eval_batch_b = build_ppo_eval_batch_from_rollout(
         obs=obs_b,
+        actions=actions_b,
         dones=dones_b,
+        log_probs=log_probs_b,
         rewards=rewards_b,
         values=values_b,
         last_value=last_value_b,
@@ -865,9 +934,9 @@ def compute_s_in_scores(
     ) -> tuple[chex.Array, chex.Array, chex.Array]:
         """Compute the S_in score for a single level.
 
-        Builds the PPO update batch and value-loss eval batch for level ``level_idx``,
+        Builds the PPO update batch and PPO eval batch for level ``level_idx``,
         then calls ``measure_s_in`` to estimate how much a virtual update on the update
-        batch improves value-loss on the held-out eval batch.
+        batch improves PPO loss on the held-out eval batch.
 
         Args:
             rng_level: PRNG key dedicated to this level.
@@ -876,8 +945,8 @@ def compute_s_in_scores(
         Returns:
             (s_in_i, loss_before_i, loss_after_i):
                 s_in_i: Scalar S_in score for this level.
-                loss_before_i: Value loss on the eval batch before the virtual update.
-                loss_after_i: Value loss on the eval batch after the virtual update.
+                loss_before_i: PPO loss on the eval batch before the virtual update.
+                loss_after_i: PPO loss on the eval batch after the virtual update.
         """
         update_batch_i = (
             jax.tree_util.tree_map(lambda x: _slice_time_env(x, level_idx), obs_a),
@@ -893,23 +962,27 @@ def compute_s_in_scores(
             jax.tree_util.tree_map(
                 lambda x: _slice_time_env(x, level_idx), eval_batch_b[0]
             ),  # eval obs: (T, 1, ...)
-            _slice_time_env(eval_batch_b[1], level_idx),  # eval last_dones: (T, 1)
-            _slice_time_env(eval_batch_b[2], level_idx),  # eval targets: (T, 1)
+            _slice_time_env(eval_batch_b[1], level_idx),  # eval actions: (T, 1)
+            _slice_time_env(eval_batch_b[2], level_idx),  # eval last_dones: (T, 1)
+            _slice_time_env(eval_batch_b[3], level_idx),  # eval log_probs: (T, 1)
+            _slice_time_env(eval_batch_b[4], level_idx),  # eval values: (T, 1)
+            _slice_time_env(eval_batch_b[5], level_idx),  # eval targets: (T, 1)
+            _slice_time_env(eval_batch_b[6], level_idx),  # eval advantages: (T, 1)
             jax.tree_util.tree_map(
-                lambda x: _slice_env(x, level_idx), eval_batch_b[3]
+                lambda x: _slice_env(x, level_idx), eval_batch_b[7]
             ),  # eval init_hstate: (1, ...)
         )
 
         rng_level, s_in_i, diagnostics_i = measure_s_in(
             rng=rng_level,
-            params=train_state.params,
+            virtual_state=train_state,
             update_batch=update_batch_i,
             eval_batch=eval_batch_i,
-            loss_fn=lambda params, batch: value_loss_fn_for_s_in(
-                params, batch, apply_fn=train_state.apply_fn
+            loss_fn=lambda state, batch: ppo_loss_fn_for_s_in(
+                state, batch, config=config
             ),
-            virtual_update_fn=lambda key, params, batch: virtual_update_fn_for_s_in(
-                key, params, batch, train_state=train_state, config=config
+            virtual_update_fn=lambda key, state, batch: virtual_update_fn_for_s_in(
+                key, state, batch, config=config
             ),
             n_virtual_updates=config["sin_n_virtual_updates"],
             eps=config["sin_eps"],
@@ -1222,7 +1295,14 @@ def main(config=None, project="JAXUED_TEST"):
                 "lp_loss_after_mean": jnp.nan,
             }
             if config["score_function"] == "s_in":
-                rng, rng_reset_b = jax.random.split(rng)
+                rng, rng_reset_a_sin, rng_reset_b = jax.random.split(rng, 3)
+                init_obs_a_sin, init_env_state_a_sin = jax.vmap(
+                    env.reset_to_level, in_axes=(0, 0, None)
+                )(
+                    jax.random.split(rng_reset_a_sin, config["num_train_envs"]),
+                    new_levels,
+                    env_params,
+                )
                 init_obs_b, init_env_state_b = jax.vmap(
                     env.reset_to_level, in_axes=(0, 0, None)
                 )(
@@ -1230,8 +1310,33 @@ def main(config=None, project="JAXUED_TEST"):
                     new_levels,
                     env_params,
                 )
+                init_hstate_a_sin = ActorCritic.initialize_carry(
+                    (config["num_train_envs"],)
+                )
                 init_hstate_b = ActorCritic.initialize_carry(
                     (config["num_train_envs"],)
+                )
+                (
+                    (rng, train_state, _, _, _, last_value_a_sin),
+                    (
+                        obs_a_sin,
+                        actions_a_sin,
+                        rewards_a_sin,
+                        dones_a_sin,
+                        log_probs_a_sin,
+                        values_a_sin,
+                        _,
+                    ),
+                ) = sample_trajectories_rnn(
+                    rng = rng,
+                    env = env,
+                    env_params = env_params,
+                    train_state = train_state,
+                    init_hstate = init_hstate_a_sin,
+                    init_obs = init_obs_a_sin,
+                    init_env_state = init_env_state_a_sin,
+                    num_envs = config["num_train_envs"],
+                    max_episode_length = config["num_steps"],
                 )
                 (
                     (rng, train_state, _, _, _, last_value_b),
@@ -1251,14 +1356,14 @@ def main(config=None, project="JAXUED_TEST"):
                     rng=rng,
                     train_state=train_state,
                     rollout_a=(
-                        obs,
-                        actions,
-                        rewards,
-                        dones,
-                        log_probs,
-                        values,
-                        last_value,
-                        init_hstate_a,
+                        obs_a_sin,
+                        actions_a_sin,
+                        rewards_a_sin,
+                        dones_a_sin,
+                        log_probs_a_sin,
+                        values_a_sin,
+                        last_value_a_sin,
+                        init_hstate_a_sin,
                     ),
                     rollout_b=(
                         obs_b,
@@ -1383,7 +1488,14 @@ def main(config=None, project="JAXUED_TEST"):
                 "lp_loss_after_mean": jnp.nan,
             }
             if config["score_function"] == "s_in":
-                rng, rng_reset_b = jax.random.split(rng)
+                rng, rng_reset_a_sin, rng_reset_b = jax.random.split(rng, 3)
+                init_obs_a_sin, init_env_state_a_sin = jax.vmap(
+                    env.reset_to_level, in_axes=(0, 0, None)
+                )(
+                    jax.random.split(rng_reset_a_sin, config["num_train_envs"]),
+                    levels,
+                    env_params,
+                )
                 init_obs_b, init_env_state_b = jax.vmap(
                     env.reset_to_level, in_axes=(0, 0, None)
                 )(
@@ -1391,8 +1503,33 @@ def main(config=None, project="JAXUED_TEST"):
                     levels,
                     env_params,
                 )
+                init_hstate_a_sin = ActorCritic.initialize_carry(
+                    (config["num_train_envs"],)
+                )
                 init_hstate_b = ActorCritic.initialize_carry(
                     (config["num_train_envs"],)
+                )
+                (
+                    (rng, train_state, _, _, _, last_value_a_sin),
+                    (
+                        obs_a_sin,
+                        actions_a_sin,
+                        rewards_a_sin,
+                        dones_a_sin,
+                        log_probs_a_sin,
+                        values_a_sin,
+                        _,
+                    ),
+                ) = sample_trajectories_rnn(
+                    rng,
+                    env,
+                    env_params,
+                    train_state,
+                    init_hstate_a_sin,
+                    init_obs_a_sin,
+                    init_env_state_a_sin,
+                    config["num_train_envs"],
+                    config["num_steps"],
                 )
                 (
                     (rng, train_state, _, _, _, last_value_b),
@@ -1412,14 +1549,14 @@ def main(config=None, project="JAXUED_TEST"):
                     rng=rng,
                     train_state=train_state,
                     rollout_a=(
-                        obs,
-                        actions,
-                        rewards,
-                        dones,
-                        log_probs,
-                        values,
-                        last_value,
-                        init_hstate_a,
+                        obs_a_sin,
+                        actions_a_sin,
+                        rewards_a_sin,
+                        dones_a_sin,
+                        log_probs_a_sin,
+                        values_a_sin,
+                        last_value_a_sin,
+                        init_hstate_a_sin,
                     ),
                     rollout_b=(
                         obs_b,
@@ -1551,7 +1688,14 @@ def main(config=None, project="JAXUED_TEST"):
                 "lp_loss_after_mean": jnp.nan,
             }
             if config["score_function"] == "s_in":
-                rng, rng_reset_b = jax.random.split(rng)
+                rng, rng_reset_a_sin, rng_reset_b = jax.random.split(rng, 3)
+                init_obs_a_sin, init_env_state_a_sin = jax.vmap(
+                    env.reset_to_level, in_axes=(0, 0, None)
+                )(
+                    jax.random.split(rng_reset_a_sin, config["num_train_envs"]),
+                    child_levels,
+                    env_params,
+                )
                 init_obs_b, init_env_state_b = jax.vmap(
                     env.reset_to_level, in_axes=(0, 0, None)
                 )(
@@ -1559,8 +1703,33 @@ def main(config=None, project="JAXUED_TEST"):
                     child_levels,
                     env_params,
                 )
+                init_hstate_a_sin = ActorCritic.initialize_carry(
+                    (config["num_train_envs"],)
+                )
                 init_hstate_b = ActorCritic.initialize_carry(
                     (config["num_train_envs"],)
+                )
+                (
+                    (rng, train_state, _, _, _, last_value_a_sin),
+                    (
+                        obs_a_sin,
+                        actions_a_sin,
+                        rewards_a_sin,
+                        dones_a_sin,
+                        log_probs_a_sin,
+                        values_a_sin,
+                        _,
+                    ),
+                ) = sample_trajectories_rnn(
+                    rng,
+                    env,
+                    env_params,
+                    train_state,
+                    init_hstate_a_sin,
+                    init_obs_a_sin,
+                    init_env_state_a_sin,
+                    config["num_train_envs"],
+                    config["num_steps"],
                 )
                 (
                     (rng, train_state, _, _, _, last_value_b),
@@ -1580,14 +1749,14 @@ def main(config=None, project="JAXUED_TEST"):
                     rng=rng,
                     train_state=train_state,
                     rollout_a=(
-                        obs,
-                        actions,
-                        rewards,
-                        dones,
-                        log_probs,
-                        values,
-                        last_value,
-                        init_hstate_a,
+                        obs_a_sin,
+                        actions_a_sin,
+                        rewards_a_sin,
+                        dones_a_sin,
+                        log_probs_a_sin,
+                        values_a_sin,
+                        last_value_a_sin,
+                        init_hstate_a_sin,
                     ),
                     rollout_b=(
                         obs_b,
@@ -1937,7 +2106,7 @@ if __name__ == "__main__":
         help="Score function for level prioritization. "
              "abs_pg uses policy gradient magnitudes. "
              "ppo_value_loss uses PPO clipped value loss magnitude. "
-             "s_in uses holdout critic-loss reduction after virtual updates.",
+             "s_in uses holdout PPO total-loss reduction after virtual updates.",
     )
     group.add_argument(
         "--sin_n_virtual_updates",

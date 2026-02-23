@@ -35,3 +35,23 @@ def test_maze_plr_logs_s_in_metrics() -> None:
     assert re.search(r'"lp/s_in_mean"', source)
     assert re.search(r'"lp/loss_before_mean"', source)
     assert re.search(r'"lp/loss_after_mean"', source)
+
+
+def test_maze_plr_s_in_uses_independent_a_and_b_rollouts() -> None:
+    """s_in branches should construct dedicated A and B rollouts."""
+    source = _maze_plr_source()
+
+    # Each branch should split rng into both A and B reset keys.
+    assert source.count("rng_reset_a_sin") >= 3
+    assert source.count("rng_reset_b") >= 3
+    assert source.count("obs_a_sin") >= 3
+    assert source.count("obs_b") >= 3
+
+
+def test_maze_plr_s_in_uses_ppo_eval_loss() -> None:
+    """s_in scoring should evaluate held-out data with PPO (not value-only) loss."""
+    source = _maze_plr_source()
+
+    assert "def build_ppo_eval_batch_from_rollout(" in source
+    assert "def ppo_loss_fn_for_s_in(" in source
+    assert "loss_fn=lambda state, batch: ppo_loss_fn_for_s_in(" in source

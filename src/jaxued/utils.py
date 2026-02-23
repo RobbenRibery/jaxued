@@ -11,9 +11,9 @@ from typing import Any, Callable, Dict, Tuple
 # Type aliases for accumulate_rollout_stats scan function
 _Carry = Tuple[chex.Array, chex.Array, chex.Array, chex.Array, chex.Array]
 _Input = Tuple[chex.Array, chex.Array]
-LossFn = Callable[[chex.ArrayTree, Any], chex.Array]
+LossFn = Callable[[Any, Any], chex.Array]
 VirtualUpdateFn = Callable[
-    [chex.PRNGKey, chex.ArrayTree, Any], Tuple[chex.PRNGKey, chex.ArrayTree]
+    [chex.PRNGKey, Any, Any], Tuple[chex.PRNGKey, Any]
 ]
 
 
@@ -251,34 +251,34 @@ def s_in_from_losses(
 
 def run_k_virtual_updates(
     rng: chex.PRNGKey,
-    params: chex.ArrayTree,
+    virtual_state: Any,
     update_batch: Any,
     virtual_update_fn: VirtualUpdateFn,
     n_virtual_updates: int,
-) -> Tuple[chex.PRNGKey, chex.ArrayTree]:
+) -> Tuple[chex.PRNGKey, Any]:
     """Apply a virtual update rule K times.
 
     Args:
         rng: PRNG key.
-        params: Starting parameters.
+        virtual_state: Starting virtual state (e.g., TrainState or params).
         update_batch: Batch used for each virtual update.
         virtual_update_fn: One-step virtual update function.
         n_virtual_updates: Number of virtual updates K.
 
     Returns:
-        Tuple of (rng, updated_params) after K steps.
+        Tuple of (rng, updated_virtual_state) after K steps.
     """
 
     def _body(_, carry):
-        rng_curr, params_curr = carry
-        return virtual_update_fn(rng_curr, params_curr, update_batch)
+        rng_curr, state_curr = carry
+        return virtual_update_fn(rng_curr, state_curr, update_batch)
 
-    return jax.lax.fori_loop(0, n_virtual_updates, _body, (rng, params))
+    return jax.lax.fori_loop(0, n_virtual_updates, _body, (rng, virtual_state))
 
 
 def measure_s_in(
     rng: chex.PRNGKey,
-    params: chex.ArrayTree,
+    virtual_state: Any,
     update_batch: Any,
     eval_batch: Any,
     loss_fn: LossFn,
@@ -290,11 +290,11 @@ def measure_s_in(
 
     Args:
         rng: PRNG key.
-        params: Base parameters theta.
+        virtual_state: Base virtual state (e.g., TrainState with optimizer state).
         update_batch: Virtual update data D_A.
         eval_batch: Holdout evaluation data D_B.
-        loss_fn: Callable L(params, eval_batch) -> per-env loss.
-        virtual_update_fn: Callable for one virtual update.
+        loss_fn: Callable L(virtual_state, eval_batch) -> per-env loss.
+        virtual_update_fn: Callable for one virtual update over virtual_state.
         n_virtual_updates: Number of virtual updates K.
         eps: Stabilizer for normalized reduction.
 
@@ -303,15 +303,15 @@ def measure_s_in(
             "loss_before": loss before K virtual updates
             "loss_after": loss after K virtual updates
     """
-    loss_before = loss_fn(params, eval_batch)
-    rng, params_k = run_k_virtual_updates(
+    loss_before = loss_fn(virtual_state, eval_batch)
+    rng, virtual_state_k = run_k_virtual_updates(
         rng=rng,
-        params=params,
+        virtual_state=virtual_state,
         update_batch=update_batch,
         virtual_update_fn=virtual_update_fn,
         n_virtual_updates=n_virtual_updates,
     )
-    loss_after = loss_fn(params_k, eval_batch)
+    loss_after = loss_fn(virtual_state_k, eval_batch)
     return rng, s_in_from_losses(loss_before, loss_after, eps=eps), {
         "loss_before": loss_before,
         "loss_after": loss_after,
