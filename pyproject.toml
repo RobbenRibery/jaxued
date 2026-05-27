@@ -29,7 +29,7 @@ maintainers = [
 ]
 dependencies = [
     "numpy",
-    "jax[cuda12]",
+    "jax",
     "flax",
     "chex",
     "gymnax",
@@ -49,6 +49,14 @@ dependencies = [
 [project.urls]
 Homepage = "https://github.com/dramacow/jaxued"
 Issues = "https://github.com/dramacow/jaxued/issues"
+
+[project.optional-dependencies]
+cuda = [
+    "jax[cuda12]; sys_platform == 'linux'",
+]
+craftax = [
+    "craftax>=1.5.0,<2",
+]
 
 [tool.setuptools.packages.find]
 where = ["src"]

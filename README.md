@@ -101,18 +101,18 @@ And make any other changes necessary to the network architecture, etc.
 ## Supported Environments
 ### Craftax
 `examples/craftax/craftax_plr.py` contains code to run DR, PLR and ACCEL in [Craftax](https://github.com/MichaelTMatthews/Craftax).
-To use Craftax, install it using 
+To use Craftax, install the optional extra using uv:
 ```bash
-pip install git+https://github.com/MichaelTMatthews/Craftax.git@main
+uv sync --extra craftax
 ```
 
 Run it using the following command (see [here](https://dramacow.github.io/jaxued/craftax/) for the full list of arguments):
 
 ```
-python examples/craftax/craftax_plr.py --exploratory_grad_updates --num_train_envs 512 --num_updates 256
+uv run python examples/craftax/craftax_plr.py --exploratory_grad_updates --num_train_envs 512 --num_updates 256
 ```
 
-Currently, this only supports CraftaxSymbolic, but the following are coming soon:
+Currently, this first-class integration supports `Craftax-Symbolic-v1`, but the following are coming soon:
 
 - [ ] Support for Pixel Environments
 - [ ] Support for Craftax-Classic

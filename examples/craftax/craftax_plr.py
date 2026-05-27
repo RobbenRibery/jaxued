@@ -12,20 +12,12 @@ import jax.numpy as jnp
 import numpy as np
 import optax
 import orbax.checkpoint as ocp
-from craftax.constants import BLOCK_PIXEL_SIZE_IMG
-from craftax.envs.craftax_pixels_env import CraftaxPixelsEnv
-from craftax.envs.craftax_symbolic_env import CraftaxSymbolicEnv
-from craftax.renderer import render_craftax_pixels as render_pixels
-from craftax_classic.renderer import render_craftax_pixels as render_pixels_classic
-from craftax.world_gen.world_gen import generate_world as generate_world_craftax
-from craftax_classic.world_gen import generate_world as generate_world_classic
-from craftax_classic.envs.craftax_symbolic_env import CraftaxClassicSymbolicEnv
-from craftax_classic.envs.craftax_pixels_env import CraftaxClassicPixelsEnv
 from flax import core, struct
 from flax.linen.initializers import constant, orthogonal
 from flax.training.train_state import TrainState as BaseTrainState
 
 import wandb
+from jaxued.environments.craftax import make_craftax_symbolic
 from jaxued.environments.underspecified_env import (
     EnvParams,
     EnvState,
@@ -34,18 +26,6 @@ from jaxued.environments.underspecified_env import (
 )
 from jaxued.level_sampler import LevelSampler
 from jaxued.utils import compute_max_returns, max_mc, positive_value_loss
-from jaxued.wrappers import AutoReplayWrapper
-
-# Hack to resolve paths
-import sys
-
-sys.path.append(".")
-from examples.craftax.craftax_wrappers import LogWrapper
-from examples.craftax.mutators import (
-    make_mutator_craftax_mutate_angles,
-    make_mutator_craftax_swap,
-    make_mutator_craftax_swap_restricted,
-)
 
 LAYER_WIDTH = 512
 
@@ -602,9 +582,7 @@ def main(config=None, project="JAXUED_TEST"):
         tags.append("ACCEL")
     else:
         tags.append("PLR")
-    run = wandb.init(
-        config=config, project=project, group=config["run_name"], tags=tags
-    )
+    wandb.init(config=config, project=project, group=config["run_name"], tags=tags)
     config = wandb.config
 
     wandb.define_metric("num_updates")
@@ -684,80 +662,22 @@ def main(config=None, project="JAXUED_TEST"):
 
         wandb.log(log_dict)
 
-    def sample_random_level(rng):
-        if config["accel_mutation"] == "noise":
-            rng, _rng1, _rng2, _rng3, _rng4 = jax.random.split(rng, 5)
-            larger_res = (
-                DEFAULT_STATICS.map_size[0] // 4,
-                DEFAULT_STATICS.map_size[1] // 4,
-            )
-            small_res = (
-                DEFAULT_STATICS.map_size[0] // 16,
-                DEFAULT_STATICS.map_size[1] // 16,
-            )
-            x_res = (DEFAULT_STATICS.map_size[0] // 8, DEFAULT_STATICS.map_size[1] // 2)
-            fractal_noise_angles = (
-                jax.random.uniform(_rng1, (small_res[0] + 1, small_res[1] + 1)),
-                jax.random.uniform(_rng2, (small_res[0] + 1, small_res[1] + 1)),
-                jax.random.uniform(_rng3, (x_res[0] + 1, x_res[1] + 1)),
-                jax.random.uniform(_rng4, (larger_res[0] + 1, larger_res[1] + 1)),
-            )
-            params_to_use = env.default_params.replace(
-                fractal_noise_angles=fractal_noise_angles
-            )
-            return generate_world(rng, params_to_use, DEFAULT_STATICS).replace(
-                fractal_noise_angles=fractal_noise_angles
-            )
-        else:
-            return generate_world(rng, env.default_params, DEFAULT_STATICS)
+    if config["env_name"] != "Craftax-Symbolic-v1":
+        raise ValueError("v1 supports Craftax-Symbolic-v1 only.")
 
-    # Setup the environment.
-    # TODO: Add support for Pixels
-    if "Pixels" in config["env_name"]:
-        raise ValueError("Pixel-environments are not supported yet.")
-    is_classic = False
-    if config["env_name"] == "Craftax-Classic-Symbolic-v1":
-        ENV_CLASS = CraftaxClassicSymbolicEnv
-        generate_world = generate_world_classic
-        render_craftax_pixels = render_pixels_classic
-        is_classic = True
-    elif config["env_name"] == "Craftax-Classic-Pixels-v1":
-        ENV_CLASS = CraftaxClassicPixelsEnv
-        generate_world = generate_world_classic
-        render_craftax_pixels = render_pixels_classic
-        is_classic = True
-    elif config["env_name"] == "Craftax-Symbolic-v1":
-        ENV_CLASS = CraftaxSymbolicEnv
-        generate_world = generate_world_craftax
-        render_craftax_pixels = render_pixels
-    elif config["env_name"] == "Craftax-Pixels-v1":
-        ENV_CLASS = CraftaxPixelsEnv
-        generate_world = generate_world_craftax
-        render_craftax_pixels = render_pixels
-    else:
-        raise ValueError(f"Unknown environment: {config['env_name']}")
-
-    DEFAULT_STATICS = ENV_CLASS.default_static_params()
-    default_env = ENV_CLASS(DEFAULT_STATICS)
-    env = LogWrapper(default_env)
-    env = AutoReplayWrapper(env)
-    eval_env = env
-    env_params = env.default_params
-    # What mutator do we use?
-    if config["accel_mutation"] == "noise":
-        mutate_level = make_mutator_craftax_mutate_angles(
-            generate_world, DEFAULT_STATICS, env.default_params
-        )
-    elif config["accel_mutation"] == "swap_restricted":
-        mutate_level = make_mutator_craftax_swap_restricted(
-            DEFAULT_STATICS, one_should_be_middle=True, is_craftax_classic=is_classic
-        )
-    elif config["accel_mutation"] == "swap":
-        mutate_level = make_mutator_craftax_swap(
-            DEFAULT_STATICS, only_middle=True, is_craftax_classic=is_classic
-        )
-    else:
-        raise ValueError(f"Unknown mutation type: {config['accel_mutation']}")
+    craftax_bundle = make_craftax_symbolic(
+        env_name=config["env_name"],
+        accel_mutation=config["accel_mutation"],
+        auto_replay=True,
+    )
+    env = craftax_bundle.env
+    eval_env = craftax_bundle.eval_env
+    env_params = craftax_bundle.env_params
+    sample_random_level = craftax_bundle.sample_level
+    mutate_level = craftax_bundle.mutate_level
+    render_level = craftax_bundle.render_level
+    generate_world = craftax_bundle.generate_world
+    static_env_params = craftax_bundle.static_env_params
 
     # And the level sampler
     level_sampler = LevelSampler(
@@ -1092,7 +1012,7 @@ def main(config=None, project="JAXUED_TEST"):
         levels = jax.vmap(generate_world, (0, None, None))(
             jax.random.split(jax.random.PRNGKey(101), num_levels),
             env_params,
-            DEFAULT_STATICS,
+            static_env_params,
         )
         init_obs, init_env_state = jax.vmap(eval_env.reset_to_level, (0, 0, None))(
             jax.random.split(rng_reset, num_levels), levels, env_params
@@ -1142,9 +1062,7 @@ def main(config=None, project="JAXUED_TEST"):
         # And one attempt
         states = jax.tree_util.tree_map(lambda x: x[:, :1], states)
         episode_lengths = episode_lengths[:1]
-        images = jax.vmap(jax.vmap(render_craftax_pixels, (0, None)), (0, None))(
-            states.env_state.env_state, BLOCK_PIXEL_SIZE_IMG
-        )  # (num_steps, num_eval_levels, ...)
+        images = jax.vmap(jax.vmap(render_level))(states.env_state.env_state)
         frames = images.transpose(
             0, 1, 4, 2, 3
         )  # WandB expects color channel before image dimensions when dealing with animations for some reason
@@ -1160,23 +1078,20 @@ def main(config=None, project="JAXUED_TEST"):
 
         max_num_images = 32
 
-        metrics["dr_levels"] = jax.vmap(render_craftax_pixels, (0, None))(
+        metrics["dr_levels"] = jax.vmap(render_level)(
             jax.tree_util.tree_map(
                 lambda x: x[:max_num_images], train_state.dr_last_level_batch
-            ),
-            BLOCK_PIXEL_SIZE_IMG,
+            )
         )
-        metrics["replay_levels"] = jax.vmap(render_craftax_pixels, (0, None))(
+        metrics["replay_levels"] = jax.vmap(render_level)(
             jax.tree_util.tree_map(
                 lambda x: x[:max_num_images], train_state.replay_last_level_batch
-            ),
-            BLOCK_PIXEL_SIZE_IMG,
+            )
         )
-        metrics["mutation_levels"] = jax.vmap(render_craftax_pixels, (0, None))(
+        metrics["mutation_levels"] = jax.vmap(render_level)(
             jax.tree_util.tree_map(
                 lambda x: x[:max_num_images], train_state.mutation_last_level_batch
-            ),
-            BLOCK_PIXEL_SIZE_IMG,
+            )
         )
 
         highest_scoring_level = level_sampler.get_levels(
@@ -1187,12 +1102,8 @@ def main(config=None, project="JAXUED_TEST"):
             level_sampler.level_weights(train_state.sampler).argmax(),
         )
 
-        metrics["highest_scoring_level"] = render_craftax_pixels(
-            highest_scoring_level, BLOCK_PIXEL_SIZE_IMG
-        )
-        metrics["highest_weighted_level"] = render_craftax_pixels(
-            highest_weighted_level, BLOCK_PIXEL_SIZE_IMG
-        )
+        metrics["highest_scoring_level"] = render_level(highest_scoring_level)
+        metrics["highest_weighted_level"] = render_level(highest_weighted_level)
 
         return (rng, train_state), metrics
 
@@ -1282,9 +1193,6 @@ if __name__ == "__main__":
         type=str,
         choices=[
             "Craftax-Symbolic-v1",
-            "Craftax-Pixels-v1",
-            "Craftax-Classic-Symbolic-v1",
-            "Craftax-Classic-Pixels-v1",
         ],
         default="Craftax-Symbolic-v1",
     )

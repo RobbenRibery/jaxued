@@ -1,10 +1,26 @@
-This example file implements DR, PLR and ACCEL for [Craftax](https://github.com/MichaelTMatthews/Craftax).
+This example file implements DR, PLR and ACCEL for
+[Craftax](https://github.com/MichaelTMatthews/Craftax). Craftax support is an
+optional dependency and is currently first-class for `Craftax-Symbolic-v1`.
+
+Install the optional dependency with uv:
+
+```bash
+uv sync --extra craftax
+```
+
+If an experiment needs the latest upstream Craftax code instead of the pinned
+PyPI range, use uv rather than vendoring Craftax into this repository:
+
+```bash
+uv add --optional craftax "craftax @ git+https://github.com/MichaelTMatthews/Craftax.git@main"
+uv sync --extra craftax
+```
 
 
 ## Usage
 
 ```bash
-python examples/craftax/maze_plr.py <args>
+uv run python examples/craftax/craftax_plr.py <args>
 ```
 
 ## Different Methods
@@ -73,3 +89,9 @@ Name  | Description | Default
 `--minimum_fill_ratio`          | The minimum number of environments in the level before replay can be triggered.                                                            | 0.5
 `--prioritization`              | `rank` or `topk`.                                                                                                                          | rank
 `--buffer_duplicate_check`      | If True, duplicate levels cannot be added to the buffer.                                                                                   | True
+
+## Scope
+
+The v1 integration supports `Craftax-Symbolic-v1` only. Pixel observations,
+Craftax-Classic, and PAIRED-style adversarial editing are intentionally left
+for follow-up work.
