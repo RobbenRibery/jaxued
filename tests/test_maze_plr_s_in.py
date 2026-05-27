@@ -55,10 +55,14 @@ def test_maze_plr_validates_s_in_rollout_count() -> None:
 
 
 def test_train_script_passes_explicit_s_in_rollout_count() -> None:
-    """The existing s_in launch script should preserve old behavior with G=1."""
+    """The s_in launch script should expose rollout count via shell env vars."""
     source = _robust_plr_s_in_script_source()
     assert "--score_function s_in" in source
-    assert "--sin_num_rollouts_per_level 1" in source
+    assert 'SIN_NUM_ROLLOUTS_PER_LEVEL="${SIN_NUM_ROLLOUTS_PER_LEVEL:-8}"' in source
+    assert '--sin_num_rollouts_per_level "$SIN_NUM_ROLLOUTS_PER_LEVEL"' in source
+    assert 'SIN_N_VIRTUAL_UPDATES="${SIN_N_VIRTUAL_UPDATES:-4}"' in source
+    assert '--sin_n_virtual_updates "$SIN_N_VIRTUAL_UPDATES"' in source
+    assert "-v${SIN_N_VIRTUAL_UPDATES}-r${SIN_NUM_ROLLOUTS_PER_LEVEL}-" in source
 
 
 def test_maze_plr_s_in_collects_g_rollouts_per_set() -> None:
