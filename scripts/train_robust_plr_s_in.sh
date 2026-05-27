@@ -30,6 +30,7 @@ WANDB_EXPERIMENT_NAME="${METHOD_NAME}-s_in-seed${SEED}-walls${N_WALLS}-valueloss
 uv run -m examples.maze_plr \
     --score_function s_in \
     --sin_n_virtual_updates 1 \
+    --sin_num_rollouts_per_level 1 \
     --no-exploratory_grad_updates \
     --level_buffer_capacity 4000 \
     --replay_prob 0.8 \
