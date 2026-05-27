@@ -108,9 +108,19 @@ def test_maze_plr_s_in_returns_slotwise_plr_scores() -> None:
     assert "obs_a leaves: (T, N, G, ...)" in s_in_fn
     assert "scores: S_in per level. Shape: (N,)" in s_in_fn
     assert "num_envs = actions_a.shape[1]" in s_in_fn
-    assert "jax.vmap(" in s_in_fn
     assert "jnp.arange(num_envs, dtype=jnp.int32)" in s_in_fn
     assert '"lp_s_in_mean": scores.mean()' in s_in_fn
+
+
+def test_maze_plr_s_in_scores_levels_sequentially_for_tpu_compile_safety() -> None:
+    """S_in should avoid vmapping virtual TrainState updates across all levels."""
+    source = _maze_plr_source()
+    s_in_fn = _function_source(source, "compute_s_in_scores")
+
+    assert "def _scan_level_score(" in s_in_fn
+    assert "jax.lax.scan(" in s_in_fn
+    assert "Score levels sequentially" in s_in_fn
+    assert "jax.vmap(" not in s_in_fn
 
 
 def test_maze_plr_s_in_scores_drive_plr_insert_and_update_paths() -> None:

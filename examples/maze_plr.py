@@ -1097,20 +1097,18 @@ def compute_s_in_scores(
             jnp.ravel(diagnostics_i["loss_after"])[0],
         )
 
-    def _next_level_key(
-        rng_carry: chex.PRNGKey, _: None
-    ) -> tuple[chex.PRNGKey, chex.PRNGKey]:
-        # Preserve the exact RNG progression of the previous scan implementation so
-        # score values and downstream randomness remain behaviorally identical.
+    def _scan_level_score(
+        rng_carry: chex.PRNGKey, level_idx: chex.Array
+    ) -> tuple[chex.PRNGKey, tuple[chex.Array, chex.Array, chex.Array]]:
         rng_carry, rng_level = jax.random.split(rng_carry)
-        return rng_carry, rng_level
+        return rng_carry, _per_level_score(rng_level, level_idx)
 
-    # Generate per-level keys with the same sequence as before, then vectorize the
-    # expensive per-level S_in computation across levels for better throughput.
-    rng, rng_levels = jax.lax.scan(_next_level_key, rng, None, length=num_envs)
-    scores, loss_before, loss_after = jax.vmap(
-        _per_level_score, in_axes=(0, 0)
-    )(rng_levels, jnp.arange(num_envs, dtype=jnp.int32))
+    # Score levels sequentially to keep TPU/XLA compilation bounded. A vmap here
+    # batches virtual TrainState updates across N levels and can produce a huge
+    # nested optimizer graph.
+    rng, (scores, loss_before, loss_after) = jax.lax.scan(
+        _scan_level_score, rng, jnp.arange(num_envs, dtype=jnp.int32)
+    )
     return rng, scores, {
         "lp_s_in_mean": scores.mean(),
         "lp_loss_before_mean": loss_before.mean(),
