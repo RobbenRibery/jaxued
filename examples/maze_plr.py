@@ -950,6 +950,8 @@ def compute_s_in_scores(
             as rollout_a), collected from independent trajectories on the same levels:
             (obs_b, actions_b, rewards_b, dones_b, log_probs_b, values_b, last_value_b, init_hstate_b)
         config: Config containing S_in hyperparameters.
+            sin_score_batch_size controls how many sampled level slots are scored
+            together; the output score is still one scalar per slot.
 
     Returns:
         (rng, scores, metrics):
@@ -1097,18 +1099,57 @@ def compute_s_in_scores(
             jnp.ravel(diagnostics_i["loss_after"])[0],
         )
 
-    def _scan_level_score(
-        rng_carry: chex.PRNGKey, level_idx: chex.Array
-    ) -> tuple[chex.PRNGKey, tuple[chex.Array, chex.Array, chex.Array]]:
+    def _next_level_key(
+        rng_carry: chex.PRNGKey, _: None
+    ) -> tuple[chex.PRNGKey, chex.PRNGKey]:
         rng_carry, rng_level = jax.random.split(rng_carry)
-        return rng_carry, _per_level_score(rng_level, level_idx)
+        return rng_carry, rng_level
 
-    # Score levels sequentially to keep TPU/XLA compilation bounded. A vmap here
-    # batches virtual TrainState updates across N levels and can produce a huge
-    # nested optimizer graph.
-    rng, (scores, loss_before, loss_after) = jax.lax.scan(
-        _scan_level_score, rng, jnp.arange(num_envs, dtype=jnp.int32)
-    )
+    rng, rng_levels = jax.lax.scan(_next_level_key, rng, None, length=num_envs)
+    level_indices = jnp.arange(num_envs, dtype=jnp.int32)
+    score_batch_size = min(config["sin_score_batch_size"], num_envs)
+
+    if score_batch_size == 1:
+        # Fully sequential scoring is the safest TPU/XLA path because it avoids
+        # batching virtual TrainState updates across sampled levels.
+        def _score_one(
+            _: None, batch: tuple[chex.PRNGKey, chex.Array]
+        ) -> tuple[None, tuple[chex.Array, chex.Array, chex.Array]]:
+            rng_level, level_idx = batch
+            return None, _per_level_score(rng_level, level_idx)
+
+        _, (scores, loss_before, loss_after) = jax.lax.scan(
+            _score_one, None, (rng_levels, level_indices)
+        )
+    else:
+        # Bound cross-level vectorization by chunking levels. This gives a
+        # tunable throughput/compile-size tradeoff without vmapping across all N.
+        num_score_batches = (num_envs + score_batch_size - 1) // score_batch_size
+        num_padded_levels = num_score_batches * score_batch_size
+        pad_count = num_padded_levels - num_envs
+        rng_pad = jnp.repeat(rng_levels[:1], pad_count, axis=0)
+        idx_pad = jnp.zeros((pad_count,), dtype=level_indices.dtype)
+        rng_level_batches = jnp.concatenate([rng_levels, rng_pad], axis=0).reshape(
+            num_score_batches, score_batch_size, *rng_levels.shape[1:]
+        )
+        level_idx_batches = jnp.concatenate([level_indices, idx_pad], axis=0).reshape(
+            num_score_batches, score_batch_size
+        )
+
+        def _score_batch(
+            _: None, batch: tuple[chex.PRNGKey, chex.Array]
+        ) -> tuple[None, tuple[chex.Array, chex.Array, chex.Array]]:
+            rng_batch, level_idx_batch = batch
+            return None, jax.vmap(_per_level_score, in_axes=(0, 0))(
+                rng_batch, level_idx_batch
+            )
+
+        _, (scores, loss_before, loss_after) = jax.lax.scan(
+            _score_batch, None, (rng_level_batches, level_idx_batches)
+        )
+        scores = scores.reshape(num_padded_levels)[:num_envs]
+        loss_before = loss_before.reshape(num_padded_levels)[:num_envs]
+        loss_after = loss_after.reshape(num_padded_levels)[:num_envs]
     return rng, scores, {
         "lp_s_in_mean": scores.mean(),
         "lp_loss_before_mean": loss_before.mean(),
@@ -1131,7 +1172,7 @@ def main(config=None, project="JAXUED_TEST"):
         tags.append("ACCEL")
     else:
         tags.append("PLR")
-    run = wandb.init(
+    wandb.init(
         config=config,
         project=project,
         name=config["wandb_experiment_name"],
@@ -2056,6 +2097,14 @@ if __name__ == "__main__":
              "training environment slot when computing s_in. Required for s_in.",
     )
     group.add_argument(
+        "--sin_score_batch_size",
+        type=int,
+        default=1,
+        help="Number of sampled training environment slots to score together "
+             "inside s_in. Use 1 for the safest TPU compile path; increase for "
+             "more throughput if compilation remains stable.",
+    )
+    group.add_argument(
         "--exploratory_grad_updates",
         action=argparse.BooleanOptionalAction,
         default=False,
@@ -2095,6 +2144,8 @@ if __name__ == "__main__":
         and config["sin_num_rollouts_per_level"] < 1
     ):
         parser.error("--sin_num_rollouts_per_level must be >= 1 when provided.")
+    if config["sin_score_batch_size"] < 1:
+        parser.error("--sin_score_batch_size must be >= 1.")
     if (
         config["score_function"] == "s_in"
         and config["sin_num_rollouts_per_level"] is None

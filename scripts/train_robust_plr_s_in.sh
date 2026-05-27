@@ -2,7 +2,7 @@
 # Train maze PLR with S_in scoring function
 #
 # Usage:
-#   SEED=3 N_WALLS=60 SIN_N_VIRTUAL_UPDATES=4 SIN_NUM_ROLLOUTS_PER_LEVEL=8 \
+#   SEED=3 N_WALLS=60 SIN_N_VIRTUAL_UPDATES=4 SIN_NUM_ROLLOUTS_PER_LEVEL=8 SIN_SCORE_BATCH_SIZE=2 \
 #     ./scripts/train_robust_plr_s_in.sh [seed] [n_walls] [extra args...]
 # Positional integers (if provided) take precedence over env vars.
 SEED="${SEED:-0}"
@@ -25,6 +25,7 @@ if ! [[ "${N_WALLS}" =~ ^[0-9]+$ ]]; then
 fi
 SIN_N_VIRTUAL_UPDATES="${SIN_N_VIRTUAL_UPDATES:-4}"
 SIN_NUM_ROLLOUTS_PER_LEVEL="${SIN_NUM_ROLLOUTS_PER_LEVEL:-8}"
+SIN_SCORE_BATCH_SIZE="${SIN_SCORE_BATCH_SIZE:-2}"
 if ! [[ "${SIN_N_VIRTUAL_UPDATES}" =~ ^[0-9]+$ ]] || [[ "${SIN_N_VIRTUAL_UPDATES}" -lt 1 ]]; then
     echo "Error: sin_n_virtual_updates must be a positive integer, got '${SIN_N_VIRTUAL_UPDATES}'." >&2
     exit 1
@@ -33,15 +34,20 @@ if ! [[ "${SIN_NUM_ROLLOUTS_PER_LEVEL}" =~ ^[0-9]+$ ]] || [[ "${SIN_NUM_ROLLOUTS
     echo "Error: sin_num_rollouts_per_level must be a positive integer, got '${SIN_NUM_ROLLOUTS_PER_LEVEL}'." >&2
     exit 1
 fi
+if ! [[ "${SIN_SCORE_BATCH_SIZE}" =~ ^[0-9]+$ ]] || [[ "${SIN_SCORE_BATCH_SIZE}" -lt 1 ]]; then
+    echo "Error: sin_score_batch_size must be a positive integer, got '${SIN_SCORE_BATCH_SIZE}'." >&2
+    exit 1
+fi
 PROJECT_NAME="ued"
 SCORE_FUNCTION="s_in"
 METHOD_NAME="robust_plr"
-WANDB_EXPERIMENT_NAME="${METHOD_NAME}-s_in-seed${SEED}-walls${N_WALLS}-v${SIN_N_VIRTUAL_UPDATES}-r${SIN_NUM_ROLLOUTS_PER_LEVEL}-ppoloss"
+WANDB_EXPERIMENT_NAME="${METHOD_NAME}-s_in-seed${SEED}-walls${N_WALLS}-v${SIN_N_VIRTUAL_UPDATES}-r${SIN_NUM_ROLLOUTS_PER_LEVEL}-b${SIN_SCORE_BATCH_SIZE}-ppoloss"
 
 uv run -m examples.maze_plr \
     --score_function s_in \
     --sin_n_virtual_updates "$SIN_N_VIRTUAL_UPDATES" \
     --sin_num_rollouts_per_level "$SIN_NUM_ROLLOUTS_PER_LEVEL" \
+    --sin_score_batch_size "$SIN_SCORE_BATCH_SIZE" \
     --no-exploratory_grad_updates \
     --level_buffer_capacity 4000 \
     --replay_prob 0.8 \

@@ -35,7 +35,9 @@ def test_maze_plr_registers_required_s_in_cli_flags() -> None:
     assert '"--sin_n_virtual_updates"' in source
     assert '"--sin_eps"' in source
     assert '"--sin_num_rollouts_per_level"' in source
+    assert '"--sin_score_batch_size"' in source
     assert "default=None" in source
+    assert "default=1" in source
 
 
 def test_maze_plr_validates_s_in_rollout_count() -> None:
@@ -46,6 +48,8 @@ def test_maze_plr_validates_s_in_rollout_count() -> None:
         'parser.error("--sin_num_rollouts_per_level must be >= 1 when provided.")'
         in source
     )
+    assert 'config["sin_score_batch_size"] < 1' in source
+    assert 'parser.error("--sin_score_batch_size must be >= 1.")' in source
     assert 'config["score_function"] == "s_in"' in source
     assert 'config["sin_num_rollouts_per_level"] is None' in source
     assert (
@@ -59,10 +63,15 @@ def test_train_script_passes_explicit_s_in_rollout_count() -> None:
     source = _robust_plr_s_in_script_source()
     assert "--score_function s_in" in source
     assert 'SIN_NUM_ROLLOUTS_PER_LEVEL="${SIN_NUM_ROLLOUTS_PER_LEVEL:-8}"' in source
+    assert 'SIN_SCORE_BATCH_SIZE="${SIN_SCORE_BATCH_SIZE:-2}"' in source
     assert '--sin_num_rollouts_per_level "$SIN_NUM_ROLLOUTS_PER_LEVEL"' in source
+    assert '--sin_score_batch_size "$SIN_SCORE_BATCH_SIZE"' in source
     assert 'SIN_N_VIRTUAL_UPDATES="${SIN_N_VIRTUAL_UPDATES:-4}"' in source
     assert '--sin_n_virtual_updates "$SIN_N_VIRTUAL_UPDATES"' in source
-    assert "-v${SIN_N_VIRTUAL_UPDATES}-r${SIN_NUM_ROLLOUTS_PER_LEVEL}-" in source
+    assert (
+        "-v${SIN_N_VIRTUAL_UPDATES}-r${SIN_NUM_ROLLOUTS_PER_LEVEL}"
+        "-b${SIN_SCORE_BATCH_SIZE}-"
+    ) in source
 
 
 def test_maze_plr_s_in_collects_g_rollouts_per_set() -> None:
@@ -112,15 +121,19 @@ def test_maze_plr_s_in_returns_slotwise_plr_scores() -> None:
     assert '"lp_s_in_mean": scores.mean()' in s_in_fn
 
 
-def test_maze_plr_s_in_scores_levels_sequentially_for_tpu_compile_safety() -> None:
+def test_maze_plr_s_in_scores_levels_in_bounded_batches_for_tpu_compile_safety() -> None:
     """S_in should avoid vmapping virtual TrainState updates across all levels."""
     source = _maze_plr_source()
     s_in_fn = _function_source(source, "compute_s_in_scores")
 
-    assert "def _scan_level_score(" in s_in_fn
+    assert 'score_batch_size = min(config["sin_score_batch_size"], num_envs)' in s_in_fn
+    assert "if score_batch_size == 1:" in s_in_fn
+    assert "def _score_one(" in s_in_fn
+    assert "def _score_batch(" in s_in_fn
     assert "jax.lax.scan(" in s_in_fn
-    assert "Score levels sequentially" in s_in_fn
-    assert "jax.vmap(" not in s_in_fn
+    assert "num_score_batches = (num_envs + score_batch_size - 1) // score_batch_size" in s_in_fn
+    assert "score_batch_size, *rng_levels.shape[1:]" in s_in_fn
+    assert "jax.vmap(_per_level_score, in_axes=(0, 0))" in s_in_fn
 
 
 def test_maze_plr_s_in_scores_drive_plr_insert_and_update_paths() -> None:
