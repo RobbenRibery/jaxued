@@ -1,0 +1,1072 @@
+\documentclass[11pt]{article}
+
+\usepackage[margin=1in]{geometry}
+\usepackage{amsmath,amssymb,amsfonts}
+\usepackage{array}
+\usepackage{booktabs}
+\usepackage{enumitem}
+\usepackage{hyperref}
+\usepackage{microtype}
+\usepackage[T1]{fontenc}
+\usepackage{lmodern}
+
+\hypersetup{
+  colorlinks=true,
+  linkcolor=blue,
+  urlcolor=blue,
+  citecolor=blue,
+}
+
+\title{Epistemic Information Gain, Entropy, and Entropy Collapse in Reinforcement Learning}
+\author{}
+\date{}
+
+\newcommand{\D}{\mathcal{D}}
+\newcommand{\E}{\mathbb{E}}
+\newcommand{\Env}{\mathcal{E}}
+\newcommand{\A}{\mathcal{A}}
+\newcommand{\Sref}{\mathcal{S}_{\mathrm{ref}}}
+\newcommand{\KL}{\mathrm{KL}}
+\newcommand{\Hent}{\mathrm{H}}
+\newcommand{\I}{\mathrm{I}}
+
+\begin{document}
+\maketitle
+
+\begin{abstract}
+This note gives a first-principles account of how to measure information gained
+by an RL agent after learning from a rollout on a single environment. The core
+claim is simple: entropy reduction is meaningful only after naming the
+uncertainty object whose entropy is being reduced. Entropy over actions measures
+how decisive a policy is. Entropy over latent hypotheses measures epistemic
+uncertainty. Expected epistemic information gain is expected posterior entropy
+reduction, equivalently mutual information. In practical RL systems, this ideal
+quantity is measured differently for a single non-Bayesian policy, an ensemble of
+policies, and a Bayesian policy. The document ends with concrete estimators and
+diagnostics for separating useful information gain from entropy collapse.
+\end{abstract}
+
+\section{The First Principle: Information Is Uncertainty Reduction}
+
+Let $Z$ be an unknown quantity. It could be a hidden task identity, a reward
+parameter, a transition parameter, a value-function hypothesis, or a policy
+parameter. A belief over $Z$ is a probability distribution $p(z)$. The entropy of
+that belief is
+\begin{equation}
+  \Hent[Z]
+  =
+  -\sum_z p(z)\log p(z),
+\end{equation}
+for a discrete variable. Entropy is high when the belief mass is spread across
+many alternatives and low when the belief is concentrated.
+
+If a new observation $Y$ is collected, the belief changes from $p(z)$ to
+$p(z \mid y)$. The information gained from the observation is the reduction in
+uncertainty:
+\begin{equation}
+  \Hent[Z] - \Hent[Z \mid Y=y].
+\end{equation}
+Before observing $Y$, the possible outcomes are unknown, so the expected
+information gain is
+\begin{equation}
+  \I(Z;Y)
+  =
+  \Hent[Z] - \E_{y \sim p(y)}\Hent[Z \mid Y=y].
+\end{equation}
+This is mutual information. An equivalent expression is an expected KL
+divergence:
+\begin{equation}
+  \I(Z;Y)
+  =
+  \E_{y \sim p(y)}
+  \KL\left(p(z \mid y)\,\|\,p(z)\right).
+\end{equation}
+
+This equivalence is important in RL. The entropy-reduction view says
+``uncertainty went down.'' The KL view says ``the observation changed the
+belief.'' For continuous latent variables, differential entropy can be
+coordinate-sensitive, so the KL form is often the cleaner measurement.
+
+\section{Epistemic Information Gain From One Environment}
+
+Let $\D$ be the agent's current data and let $e \in \Env$ be a particular
+environment or level. A rollout from that environment is
+\begin{equation}
+  \tau = (s_0,a_0,r_0,s_1,\ldots,s_T).
+\end{equation}
+Let $\theta$ denote the latent object the agent is uncertain about. The exact
+choice of $\theta$ depends on the scientific question:
+\begin{itemize}[leftmargin=*]
+  \item transition dynamics parameters;
+  \item reward parameters;
+  \item task identity;
+  \item value-function hypotheses;
+  \item policy parameters;
+  \item the identity of which action is optimal in each state.
+\end{itemize}
+
+The expected epistemic information gain of rolling out on environment $e$ is
+\begin{equation}
+  \mathrm{EIG}(e)
+  =
+  \Hent[\theta \mid \D]
+  -
+  \E_{\tau \sim p(\tau \mid e,\D)}
+  \Hent[\theta \mid \D,\tau].
+\end{equation}
+Equivalently,
+\begin{equation}
+  \mathrm{EIG}(e)
+  =
+  \I(\theta;\tau \mid \D,e)
+  =
+  \E_{\tau \sim p(\tau \mid e,\D)}
+  \KL\left(p(\theta \mid \D,\tau)\,\|\,p(\theta \mid \D)\right).
+\end{equation}
+
+This is the clean target. It is epistemic because the entropy is over what is
+true but unknown, not over stochastic actions or random outcomes. It is expected
+because the rollout has not yet happened when choosing which environment to
+sample.
+
+\section{Nearby Methods for Scoring Informative Environments}
+
+Several recent methods are close to the question in this note, but they place
+the information signal in different objects: policy parameters, learned dynamics,
+ensemble predictions, or task-policy relationships. This section summarizes four
+representative methods and relates each to the ideal quantity
+$\I(\theta;\tau \mid \D,e)$.
+
+\subsection{PACE: Parameter Change as Realized Learning Progress}
+
+PACE, proposed by Yuan et al., is the closest method to the single-policy
+setting. It starts from the observation that many UED scores are indirect:
+regret requires an optimal policy or an expert, value-error scores depend on the
+critic, and Monte Carlo scores can have high variance. PACE instead scores a
+level by the policy parameter change induced by training on that level.
+
+Let $\theta^-$ be the policy parameters before a provisional update on level
+$e$, and let $\theta_e^+$ be the parameters after that local update. The PACE
+score is essentially
+\begin{equation}
+  S_{\mathrm{PACE}}(e)
+  =
+  \left\lVert \theta_e^+ - \theta^- \right\rVert_2^2.
+\end{equation}
+The motivation is a first-order Taylor approximation. If a local gradient update
+on level $e$ is aligned with the level-specific objective, then the objective
+improvement induced by that level is proportional to the squared norm of the
+corresponding parameter update, up to a step-size constant. PACE therefore treats
+parameter movement as an intrinsic, low-variance proxy for realized learning
+progress.
+
+Operationally, PACE collects a trajectory on a candidate level, performs a
+temporary update to compute the induced parameter change, inserts high-scoring
+levels into a replay buffer, and samples from that buffer with prioritization and
+staleness correction. This maps naturally to the single non-Bayesian policy
+regime in this note: it is not epistemic IG, because there is no posterior, but
+it is a direct approximation to ``this environment caused the current learner to
+move.''
+
+\subsection{MaxInfoRL: Information Gain as an Intrinsic Reward}
+
+MaxInfoRL, proposed by Sukhija et al., uses information gain inside online RL
+exploration rather than as an external environment-selection score. The agent
+learns a model of the unknown transition-and-reward function $f^\star$ and uses
+an information-gain bonus to direct exploration toward transitions that reduce
+uncertainty about $f^\star$.
+
+For a transition query $(s,a)$, the ideal intrinsic reward is of the form
+\begin{equation}
+  r_{\mathrm{IG}}(s,a)
+  =
+  \I(\tilde{s}', f^\star \mid s,a,\D),
+\end{equation}
+where $\tilde{s}'$ denotes the predicted next transition target, possibly
+including reward. In practice, the information gain does not generally have a
+closed form, so MaxInfoRL uses an upper bound derived from epistemic uncertainty
+in a learned model. With an ensemble or probabilistic model, the practical bonus
+is high where model disagreement about the transition or reward is high.
+
+MaxInfoRL then combines this intrinsic reward with maximum-entropy actor-critic
+updates. In soft actor-critic notation, the policy is no longer pushed only
+toward high extrinsic value and action entropy; it is also pushed toward states
+and actions where the model expects high information gain. This method is a true
+information-gain method with respect to dynamics/reward uncertainty, but its
+unit of selection is a transition or behavior policy, not necessarily a reusable
+environment level.
+
+\subsection{MAX: Ensemble Disagreement for Active Exploration}
+
+Model-Based Active Exploration (MAX), proposed by Shyam, Jaskowski, and Gomez,
+also treats exploration as an active information-gathering problem. MAX trains
+an ensemble of forward dynamics models and plans in a surrogate exploration MDP
+whose reward is novelty of predicted transitions.
+
+For a discrete next-state distribution, the ideal ensemble disagreement score is
+\begin{equation}
+  u_{\mathrm{MAX}}(s,a)
+  =
+  \Hent\left[
+    \frac{1}{N}\sum_{i=1}^{N}p_i(s' \mid s,a)
+  \right]
+  -
+  \frac{1}{N}\sum_{i=1}^{N}
+  \Hent[p_i(s' \mid s,a)].
+\end{equation}
+This is the same entropy-of-the-mean minus mean-entropy structure used earlier
+for action-space epistemic uncertainty. Here, however, it is applied to next
+state predictions rather than action distributions. In continuous domains, MAX
+replaces Shannon entropy with Renyi entropy and uses a Jensen-Renyi divergence
+so that disagreement among Gaussian ensemble predictions can be computed
+tractably.
+
+MAX is therefore an ensemble approximation to epistemic information gain about
+the dynamics. It is especially relevant to the ensemble-policy section of this
+note because it shows the same mathematical decomposition in a different space:
+not ``which action do policy hypotheses prefer?'' but ``which transition do
+dynamics hypotheses predict?''
+
+\subsection{ITTS: Information-Theoretic Task Selection for Meta-RL}
+
+Information-Theoretic Task Selection (ITTS), proposed by Luna Gutierrez and
+Leonetti, studies which training tasks should be selected for meta-RL. Unlike
+PACE, MaxInfoRL, and MAX, ITTS is not primarily about online exploration within a
+single environment. It asks which tasks are useful members of a meta-training
+set.
+
+ITTS keeps a candidate training set and a validation task set. It selects source
+tasks that are both different from already selected tasks and relevant to the
+validation tasks. Difference is measured by average KL divergence between the
+policies learned for two candidate tasks, evaluated over states sampled from the
+validation tasks:
+\begin{equation}
+  \delta(m_1,m_2)
+  =
+  \frac{1}{|\Sref|}
+  \sum_{s \in \Sref}
+  \KL\left(
+    \pi_{m_1}^{\star}(\cdot \mid s)
+    \,\|\,
+    \pi_{m_2}^{\star}(\cdot \mid s)
+  \right).
+\end{equation}
+Relevance is measured by adapting a policy from one task to another and checking
+how the policy entropy changes over the validation distribution. A task is useful
+when it is not redundant with selected tasks and transfers information to the
+validation tasks.
+
+For the present note, ITTS is important because it treats information as a
+relationship between tasks mediated by policies. It is less directly applicable
+to scoring a single rollout on one environment, but it suggests a useful
+evaluation question: does learning on environment $e_i$ change the policy in a
+way that transfers to a target task distribution, or only in a way that is
+locally decisive on $e_i$?
+
+\subsection{What Has Been Compared Carefully?}
+
+The clearest metric-comparison work I found is No Regrets by Rutherford et al.
+It asks whether common UED prioritization scores actually approximate the
+quantities they are meant to approximate. In domains where regret can be
+computed or probed more directly, they compare practical scores such as MaxMC
+and positive value loss against regret, success rate, and learnability. Their key
+finding is that practical regret approximations can correlate with success rate
+rather than learnability, causing replay to spend experience on levels the agent
+has already mastered.
+
+PACE also compares against UED baselines such as DR, PLR, robust PLR, and ACCEL,
+and explicitly discusses bias, variance, and computational cost of value-based,
+Monte Carlo, regret, and marginal-benefit signals. However, it is primarily an
+algorithmic comparison, not a full oracle study of every approximation against a
+shared true information-gain target.
+
+MaxInfoRL and MAX compare information-gain or disagreement-based exploration
+against exploration baselines. ITTS compares selected task subsets against using
+all or other subsets of meta-training tasks. I did not find a unified benchmark
+that places PACE-style parameter change, MaxInfoRL-style model information gain,
+MAX-style ensemble disagreement, and ITTS-style task-policy transfer under one
+oracle information-gain evaluation.
+
+\section{Entropy in RL}
+
+RL contains several different entropies. Confusing them is the main source of
+bad information-gain measurements.
+
+\subsection{Policy Action Entropy}
+
+For a stochastic policy $\pi(a \mid s)$, action entropy at state $s$ is
+\begin{equation}
+  \Hent_{\pi}(s)
+  =
+  -\sum_{a \in \A}\pi(a \mid s)\log \pi(a \mid s).
+\end{equation}
+This measures how spread out the policy's action distribution is. Low action
+entropy means the policy is decisive. High action entropy means the policy is
+diffuse or exploratory.
+
+For a fixed probe state set $\Sref$, the average action entropy is
+\begin{equation}
+  \bar{\Hent}_{\pi}(\Sref)
+  =
+  \frac{1}{|\Sref|}
+  \sum_{s \in \Sref}\Hent_{\pi}(s).
+\end{equation}
+
+\subsection{Trajectory Entropy}
+
+A policy and environment together induce a distribution over trajectories:
+\begin{equation}
+  p(\tau \mid e,\pi).
+\end{equation}
+The entropy of this distribution measures how many possible trajectories the
+agent-environment system can generate. It mixes policy stochasticity, transition
+stochasticity, and state visitation diversity.
+
+\subsection{Return Entropy}
+
+The entropy of returns measures variability in cumulative reward:
+\begin{equation}
+  G(\tau)=\sum_{t=0}^{T}\gamma^t r_t.
+\end{equation}
+This is often about outcome uncertainty rather than epistemic uncertainty. A
+fully understood environment can still have high return entropy if it is
+intrinsically stochastic.
+
+\subsection{Belief Entropy}
+
+Belief entropy is entropy over latent hypotheses:
+\begin{equation}
+  \Hent[\theta \mid \D].
+\end{equation}
+This is the entropy that directly supports epistemic information gain. In a
+Bayesian model it is explicit. In an ensemble it is approximated. In a single
+non-Bayesian policy it is usually absent, so proxy metrics are required.
+
+\section{Decisiveness Is Not Epistemic Information}
+
+Suppose a policy has two actions at state $s$:
+\begin{equation}
+  \pi_{\mathrm{before}}(\cdot \mid s)=(0.5,0.5),
+  \qquad
+  \pi_{\mathrm{after}}(\cdot \mid s)=(0.95,0.05).
+\end{equation}
+The action entropy dropped. The agent became more decisive. But this does not
+prove that the agent learned the truth about the environment. The same pattern
+can arise from:
+\begin{itemize}[leftmargin=*]
+  \item correct learning from informative data;
+  \item a changed entropy coefficient or temperature;
+  \item optimizer instability;
+  \item overfitting to a noisy rollout;
+  \item a policy update that sharpened preferences without reducing model
+  uncertainty.
+\end{itemize}
+
+The distinction is:
+\begin{align}
+  \text{Decisiveness}
+  &=
+  \text{concentration of }\pi(a \mid s),
+  \\
+  \text{Epistemic information}
+  &=
+  \text{reduction of uncertainty about }\theta.
+\end{align}
+Action entropy reduction is useful, but it is not automatically epistemic.
+
+\section{Entropy Collapse in RL}
+
+Entropy collapse is the rapid reduction of policy action entropy before the
+agent has learned a robust, generalizable decision rule. It is not just
+``becoming confident.'' It is becoming confident faster than the evidence
+supports.
+
+\subsection{Mechanisms}
+
+Common mechanisms include:
+\begin{itemize}[leftmargin=*]
+  \item a small or decaying entropy bonus in policy-gradient training;
+  \item large policy updates that overreact to high-variance advantages;
+  \item sparse rewards that reinforce a lucky early trajectory;
+  \item replay systems that repeatedly sample narrow states or levels;
+  \item clipping or normalization choices that hide value-function uncertainty;
+  \item deterministic action selection during data collection.
+\end{itemize}
+
+\subsection{Why Entropy Collapse Matters}
+
+Entropy collapse can masquerade as information gain. If
+\begin{equation}
+  \bar{\Hent}_{\pi_{\mathrm{before}}}(\Sref)
+  -
+  \bar{\Hent}_{\pi_{\mathrm{after}}}(\Sref)
+\end{equation}
+is large, the policy became more concentrated. But that number alone cannot say
+whether the rollout was informative. A bad rollout can make the agent confident
+in the wrong action. In that case, entropy reduction is a warning sign, not a
+success metric.
+
+\subsection{Diagnostics}
+
+Useful diagnostics for entropy collapse are:
+\begin{itemize}[leftmargin=*]
+  \item action entropy reduction on a fixed probe set;
+  \item return or success-rate improvement on held-out environments;
+  \item policy KL step size before and after learning;
+  \item value-loss change on held-out trajectories;
+  \item ensemble or posterior disagreement, when available;
+  \item calibration of predicted values against realized returns.
+\end{itemize}
+
+A healthy update has a coherent pattern: the policy changes, held-out loss or
+return improves, and epistemic disagreement decreases. An unhealthy collapse has
+policy sharpening without corresponding held-out improvement or disagreement
+reduction.
+
+\section{Measuring After Learning on a Single Environment}
+
+The experimental unit is one environment $e$. The measurement protocol should
+compare the agent before and after learning from rollouts on $e$ while holding
+the evaluation states fixed.
+
+\subsection{Protocol}
+
+\begin{enumerate}[leftmargin=*]
+  \item Save the pre-learning agent state.
+  \item Choose a fixed reference state set $\Sref$. This may be collected from a
+  broad replay buffer, held-out levels, random starts, or a standardized
+  evaluation distribution.
+  \item Sample $K$ independent rollout batches
+  $\tau_1,\ldots,\tau_K \sim p(\tau \mid e,\D)$.
+  \item For each rollout batch $\tau_k$, copy the pre-learning agent and run the
+  same learning procedure on $\D \cup \tau_k$.
+  \item Measure before and after quantities on the same $\Sref$.
+  \item Average the after-learning quantities over $k$.
+\end{enumerate}
+
+The fixed $\Sref$ matters. If entropy is measured only on states visited by each
+rollout, the metric confounds information gain with a changed state
+distribution.
+
+\section{Single Non-Bayesian Policy}
+
+A single non-Bayesian policy has parameters $\theta$ but no posterior
+$p(\theta \mid \D)$. Therefore direct epistemic information gain is not
+available. The practical target becomes learning progress: did data from
+environment $e$ cause a useful, generalizing update?
+
+\subsection{Action Entropy Reduction}
+
+For rollout batch $\tau_k$, let $\pi_k^+$ be the policy after learning on
+$\tau_k$ and $\pi^-$ the policy before learning. Define
+\begin{equation}
+  \Delta \Hent_{\mathrm{action}}(e)
+  =
+  \bar{\Hent}_{\pi^-}(\Sref)
+  -
+  \frac{1}{K}\sum_{k=1}^{K}
+  \bar{\Hent}_{\pi_k^+}(\Sref).
+\end{equation}
+This measures decisiveness gain. It is not epistemic information gain by
+itself.
+
+\subsection{Policy Update Magnitude}
+
+A direct measure of how much the rollout changed the policy is
+\begin{equation}
+  \Delta_{\mathrm{KL}}(e)
+  =
+  \frac{1}{K}\sum_{k=1}^{K}
+  \frac{1}{|\Sref|}\sum_{s \in \Sref}
+  \KL\left(\pi_k^+(\cdot \mid s)\,\|\,\pi^-(\cdot \mid s)\right).
+\end{equation}
+A symmetric version may be used when directional KL is unstable:
+\begin{equation}
+  \Delta_{\mathrm{SKL}}(e)
+  =
+  \frac{1}{2}
+  \KL(\pi_k^+\,\|\,\pi^-)
+  +
+  \frac{1}{2}
+  \KL(\pi^-\,\|\,\pi_k^+).
+\end{equation}
+
+\subsection{Probe Loss Reduction}
+
+Let $\D_{\mathrm{probe}}$ be a fixed held-out dataset of states, actions,
+returns, advantages, or value targets. Let $L(\theta;\D_{\mathrm{probe}})$ be a
+chosen loss, such as PPO surrogate loss, behavior-cloning loss, TD error, value
+loss, or return-prediction loss. Define
+\begin{equation}
+  \Delta L_{\mathrm{probe}}(e)
+  =
+  L(\theta^-;\D_{\mathrm{probe}})
+  -
+  \frac{1}{K}\sum_{k=1}^{K}
+  L(\theta_k^+;\D_{\mathrm{probe}}).
+\end{equation}
+This is one of the best single-policy proxies because it asks whether learning
+from $e$ improved performance on data not identical to the update rollout.
+
+\subsection{Rollout Surprise}
+
+If the agent has value predictions, define TD error
+\begin{equation}
+  \delta_t
+  =
+  r_t + \gamma V_{\theta^-}(s_{t+1}) - V_{\theta^-}(s_t).
+\end{equation}
+Then
+\begin{equation}
+  S_{\mathrm{TD}}(e)
+  =
+  \frac{1}{K}\sum_{k=1}^{K}
+  \sum_{t \in \tau_k}|\delta_t|
+\end{equation}
+measures how surprising the rollout was under the current value function. High
+surprise can identify candidate informative environments, but surprise without
+subsequent probe improvement may be noise rather than information.
+
+\subsection{Recommended Single-Policy Panel}
+
+For a single non-Bayesian policy, report:
+\begin{equation}
+  \left(
+  \Delta \Hent_{\mathrm{action}},
+  \Delta_{\mathrm{KL}},
+  \Delta L_{\mathrm{probe}},
+  S_{\mathrm{TD}},
+  \Delta \mathrm{return}_{\mathrm{heldout}}
+  \right).
+\end{equation}
+Interpretation should be conservative:
+\begin{itemize}[leftmargin=*]
+  \item entropy reduction alone means decisiveness;
+  \item policy KL means the rollout changed the policy;
+  \item probe loss reduction means the update was useful;
+  \item TD error means the rollout contradicted the critic;
+  \item held-out return improvement is the final behavioral check.
+\end{itemize}
+
+\section{Ensemble Policy}
+
+With $N$ policies, each policy can be treated as a hypothesis:
+\begin{equation}
+  \pi_1,\ldots,\pi_N.
+\end{equation}
+These may come from different random seeds, bootstrap resampling, different
+checkpoints, or different training perturbations. This is not automatically
+Bayesian, but it gives an empirical approximation to epistemic uncertainty.
+
+\subsection{Predictive Action Distribution}
+
+For each state $s$, define the ensemble-average action distribution:
+\begin{equation}
+  \bar{\pi}(a \mid s)
+  =
+  \frac{1}{N}\sum_{i=1}^{N}\pi_i(a \mid s).
+\end{equation}
+The total predictive action entropy is
+\begin{equation}
+  \Hent[\bar{\pi}(\cdot \mid s)].
+\end{equation}
+The average individual policy entropy is
+\begin{equation}
+  \frac{1}{N}\sum_{i=1}^{N}\Hent[\pi_i(\cdot \mid s)].
+\end{equation}
+
+\subsection{Disagreement as Epistemic Uncertainty}
+
+The ensemble disagreement term is
+\begin{equation}
+  U_{\mathrm{epi}}(s)
+  =
+  \Hent[\bar{\pi}(\cdot \mid s)]
+  -
+  \frac{1}{N}\sum_{i=1}^{N}\Hent[\pi_i(\cdot \mid s)].
+\end{equation}
+This is high when individual policies are confident but disagree. It is low
+when the policies agree, even if each policy is stochastic.
+
+Average over the probe states:
+\begin{equation}
+  U_{\mathrm{epi}}(\Sref)
+  =
+  \frac{1}{|\Sref|}\sum_{s \in \Sref}U_{\mathrm{epi}}(s).
+\end{equation}
+
+\subsection{Information-Gain Proxy After Learning on One Environment}
+
+Let the ensemble before learning be $\{\pi_i^-\}_{i=1}^{N}$. For rollout batch
+$\tau_k$, train or update the ensemble to obtain $\{\pi_{i,k}^+\}_{i=1}^{N}$.
+The ensemble epistemic-gain proxy is
+\begin{equation}
+  \widehat{\mathrm{EIG}}_{\mathrm{ens}}(e)
+  =
+  U_{\mathrm{epi}}^-(\Sref)
+  -
+  \frac{1}{K}\sum_{k=1}^{K}
+  U_{\mathrm{epi},k}^+(\Sref).
+\end{equation}
+
+Separately, report decisiveness gain:
+\begin{equation}
+  \Delta \Hent_{\mathrm{individual}}(e)
+  =
+  \frac{1}{|\Sref|}\sum_{s \in \Sref}
+  \left[
+  \frac{1}{N}\sum_i \Hent[\pi_i^-(\cdot \mid s)]
+  -
+  \frac{1}{K}\sum_k
+  \frac{1}{N}\sum_i \Hent[\pi_{i,k}^+(\cdot \mid s)]
+  \right].
+\end{equation}
+
+The separation is essential:
+\begin{itemize}[leftmargin=*]
+  \item drop in individual entropy means the policies became sharper;
+  \item drop in disagreement means the policies became more aligned;
+  \item only the second is an epistemic proxy.
+\end{itemize}
+
+\section{Bayesian Policy}
+
+A Bayesian policy maintains a posterior over parameters or hypotheses:
+\begin{equation}
+  p(\theta \mid \D).
+\end{equation}
+There may be one deployed agent, but its prediction is posterior predictive:
+\begin{equation}
+  p(a \mid s,\D)
+  =
+  \E_{\theta \sim p(\theta \mid \D)}
+  \pi_{\theta}(a \mid s).
+\end{equation}
+
+\subsection{Action-Space Epistemic Uncertainty}
+
+At a probe state $s$, total predictive action entropy is
+\begin{equation}
+  \Hent\left[
+    \E_{\theta}\pi_{\theta}(\cdot \mid s)
+  \right].
+\end{equation}
+The expected policy stochasticity is
+\begin{equation}
+  \E_{\theta}
+  \Hent[\pi_{\theta}(\cdot \mid s)].
+\end{equation}
+The epistemic action uncertainty is the difference:
+\begin{equation}
+  U_{\mathrm{Bayes}}(s)
+  =
+  \Hent\left[
+    \E_{\theta}\pi_{\theta}(\cdot \mid s)
+  \right]
+  -
+  \E_{\theta}
+  \Hent[\pi_{\theta}(\cdot \mid s)].
+\end{equation}
+This is the mutual information between the action and posterior hypothesis:
+\begin{equation}
+  U_{\mathrm{Bayes}}(s)
+  =
+  \I(a;\theta \mid s,\D).
+\end{equation}
+
+\subsection{Posterior Update From One Environment}
+
+After rollout $\tau_k$ on environment $e$, the posterior becomes
+\begin{equation}
+  p(\theta \mid \D,\tau_k).
+\end{equation}
+The action-space epistemic information-gain estimator is
+\begin{equation}
+  \widehat{\mathrm{EIG}}_{\mathrm{Bayes-action}}(e)
+  =
+  U_{\mathrm{Bayes}}^-(\Sref)
+  -
+  \frac{1}{K}\sum_{k=1}^{K}
+  U_{\mathrm{Bayes},k}^+(\Sref).
+\end{equation}
+
+This is an action-space proxy for epistemic information gain. The more direct
+Bayesian quantity is the posterior KL:
+\begin{equation}
+  \widehat{\mathrm{EIG}}_{\mathrm{Bayes}}(e)
+  =
+  \frac{1}{K}\sum_{k=1}^{K}
+  \KL\left(
+    p(\theta \mid \D,\tau_k)
+    \,\|\,
+    p(\theta \mid \D)
+  \right).
+\end{equation}
+When the posterior is represented by samples
+$\theta_1,\ldots,\theta_N$, the computation resembles the ensemble estimator.
+The interpretation is stronger: the samples approximate a posterior, not merely
+a collection of independently trained policies.
+
+\section{Expected Entropy Reduction Over Action Space}
+
+If the desired metric is explicitly expected entropy reduction over actions,
+the estimator is
+\begin{equation}
+  \mathrm{EER}_{\mathrm{action}}(e)
+  =
+  \bar{\Hent}_{\pi^-}(\Sref)
+  -
+  \frac{1}{K}\sum_{k=1}^{K}
+  \bar{\Hent}_{\pi_k^+}(\Sref).
+\end{equation}
+This is valid as a measure of action-space entropy reduction. It should be
+named as such. It becomes an epistemic metric only when the action distribution
+is posterior predictive and the epistemic component is separated from expected
+policy stochasticity.
+
+\section{Practical Measurement Table}
+
+\begin{center}
+\small
+\begin{tabular}{
+  >{\raggedright\arraybackslash}p{0.17\linewidth}
+  >{\raggedright\arraybackslash}p{0.34\linewidth}
+  >{\raggedright\arraybackslash}p{0.37\linewidth}
+}
+\toprule
+Setting & Main estimator & Interpretation \\
+\midrule
+Single-policy, non-Bayesian
+&
+$\Delta L_{\mathrm{probe}}$, $\Delta_{\mathrm{KL}}$,
+$\Delta \Hent_{\mathrm{action}}$, TD error
+&
+Learning-progress proxy. Entropy reduction means decisiveness, not direct
+epistemic information gain. \\
+\addlinespace
+Ensemble policy
+&
+$U_{\mathrm{epi}} =
+\Hent[\bar{\pi}] - \frac{1}{N}\sum_i\Hent[\pi_i]$
+&
+Disagreement reduction approximates epistemic uncertainty reduction. \\
+\addlinespace
+Bayesian policy
+&
+$\KL(p(\theta \mid \D,\tau)\,\|\,p(\theta \mid \D))$ or
+$\I(a;\theta \mid s,\D)$ reduction
+&
+Direct epistemic information gain when the posterior is well specified. \\
+\bottomrule
+\end{tabular}
+\end{center}
+
+\section{Recommended Reporting Template}
+
+For each candidate environment $e$, report the following after $K$ rollout
+batches and matched learning updates:
+\begin{enumerate}[leftmargin=*]
+  \item action entropy before and after on $\Sref$;
+  \item policy KL before versus after on $\Sref$;
+  \item probe loss before versus after on a fixed held-out dataset;
+  \item held-out return or success-rate delta;
+  \item ensemble or posterior disagreement reduction, if available;
+  \item posterior KL, if a Bayesian posterior exists.
+\end{enumerate}
+
+Then classify the result:
+\begin{itemize}[leftmargin=*]
+  \item \textbf{Useful information gain}: probe loss improves, held-out behavior
+  improves, and disagreement or posterior entropy decreases.
+  \item \textbf{Decisiveness without evidence}: action entropy drops but probe
+  loss and held-out performance do not improve.
+  \item \textbf{Surprise without learning}: TD error or rollout loss is high,
+  but subsequent probe improvement is absent.
+  \item \textbf{Instability}: policy KL is large, entropy collapses, and held-out
+  metrics worsen.
+\end{itemize}
+
+\section{Oracle Evaluation of Approximate Metrics}
+
+To compare approximations carefully, define an expensive oracle that estimates
+the actual utility of training on each candidate environment. The oracle need
+not be deployable during normal training. Its purpose is to create a reference
+ranking against which cheap metrics can be judged.
+
+\subsection{Notation for the Oracle Experiment}
+
+The oracle experiment has three layers: candidate environments, repeated trials
+on each candidate, and a fixed target evaluation distribution. The notation is:
+
+\begin{center}
+\small
+\begin{tabular}{
+  >{\raggedright\arraybackslash}p{0.18\linewidth}
+  >{\raggedright\arraybackslash}p{0.72\linewidth}
+}
+\toprule
+Symbol & Meaning \\
+\midrule
+$\mathcal{E}_{\mathrm{cand}}$ & The pool of candidate environments being
+ranked now. In a maze setting, these are the candidate levels available for
+replay or training. \\
+$M$ & Number of candidate environments in the pool. \\
+$e_j$ & The $j$th candidate environment, with $j \in \{1,\ldots,M\}$. \\
+$K$ & Number of independent oracle trials per candidate environment. Larger
+$K$ gives a lower-variance oracle estimate. \\
+$k$ & Trial index, with $k \in \{1,\ldots,K\}$. \\
+$\theta^-$ & The same saved pre-learning agent parameters used at the start of
+every oracle trial. \\
+$\tau_{j,k}$ & The rollout batch collected from candidate environment $e_j$ in
+trial $k$, using the pre-learning agent. \\
+$U(\theta^-,\tau_{j,k})$ & The fixed learning procedure applied to the cloned
+agent using rollout batch $\tau_{j,k}$. \\
+$\theta_{j,k}^+$ & The post-learning parameters after training clone $k$ on
+candidate environment $e_j$. \\
+$p_{\mathrm{target}}(e)$ & The target evaluation distribution. This should be
+held fixed and should represent the environments where generalization matters. \\
+$J_{\mathrm{target}}(\theta)$ & Evaluation performance of agent $\theta$ on the
+target distribution, such as mean return or success rate. \\
+$O(e_j)$ & The expensive oracle score for candidate environment $e_j$. \\
+$A(e_j)$ & A cheap approximation score for candidate environment $e_j$. \\
+\bottomrule
+\end{tabular}
+\end{center}
+
+The key design principle is that every candidate starts from the same
+$\theta^-$. Otherwise, a candidate may look good simply because it was evaluated
+from a better initial checkpoint. The target distribution must also stay fixed.
+Otherwise, the score mixes ``this environment taught the agent'' with ``the
+evaluation distribution changed.''
+
+\subsection{Oracle Target}
+
+Let $\mathcal{E}_{\mathrm{cand}}=\{e_1,\ldots,e_M\}$ be candidate environments.
+For each $e_j$, start from the same pre-learning agent state $\theta^-$. Run
+$K$ independent rollout-and-update trials:
+\begin{equation}
+  \theta_{j,k}^+
+  =
+  U(\theta^-, \tau_{j,k}),
+  \qquad
+  \tau_{j,k} \sim p(\tau \mid e_j,\theta^-).
+\end{equation}
+Then evaluate each updated agent on a fixed target distribution
+$p_{\mathrm{target}}(e)$ or a fixed held-out suite:
+\begin{equation}
+  O_{\mathrm{return}}(e_j)
+  =
+  \frac{1}{K}\sum_{k=1}^{K}
+  \left[
+    J_{\mathrm{target}}(\theta_{j,k}^+)
+    -
+    J_{\mathrm{target}}(\theta^-)
+  \right].
+\end{equation}
+This is a behavioral oracle: it measures actual downstream improvement caused by
+training on $e_j$.
+
+If a calibrated Bayesian posterior is available, one can also define a posterior
+oracle:
+\begin{equation}
+  O_{\mathrm{Bayes}}(e_j)
+  =
+  \frac{1}{K}\sum_{k=1}^{K}
+  \KL\left(
+    p(\theta \mid \D,\tau_{j,k})
+    \,\|\,
+    p(\theta \mid \D)
+  \right),
+\end{equation}
+or the corresponding reduction in posterior-predictive action disagreement on
+$\Sref$. This oracle is closer to epistemic information gain, but it depends on
+the posterior representation being meaningful.
+
+\subsection{Approximation Metrics to Compare}
+
+For each candidate environment $e_j$, compute cheap scores before committing to
+expensive training:
+\begin{align}
+  A_{\mathrm{entropy}}(e_j)
+  &=
+  \Delta \Hent_{\mathrm{action}}(e_j),
+  \\
+  A_{\mathrm{policyKL}}(e_j)
+  &=
+  \Delta_{\mathrm{KL}}(e_j),
+  \\
+  A_{\mathrm{probe}}(e_j)
+  &=
+  \Delta L_{\mathrm{probe}}(e_j),
+  \\
+  A_{\mathrm{PACE}}(e_j)
+  &=
+  \left\lVert \theta_j^+ - \theta^- \right\rVert_2^2,
+  \\
+  A_{\mathrm{ens}}(e_j)
+  &=
+  U_{\mathrm{epi}}^-(\Sref)
+  -
+  U_{\mathrm{epi},j}^+(\Sref),
+  \\
+  A_{\mathrm{modelIG}}(e_j)
+  &=
+  \sum_{(s,a)\in \tau_j}
+  \I(\tilde{s}', f^\star \mid s,a,\D).
+\end{align}
+These correspond, respectively, to decisiveness, behavioral movement,
+held-out learning progress, PACE-style parameter change, ensemble epistemic
+disagreement reduction, and MaxInfoRL/MAX-style model information.
+
+\subsection{Worked Toy Example}
+
+Consider three candidate maze levels:
+\begin{align*}
+  e_1 &: \text{an easy maze the agent mostly solves already}, \\
+  e_2 &: \text{a medium maze with a new useful trap pattern}, \\
+  e_3 &: \text{a very hard maze that is mostly unsolvable for the current agent}.
+\end{align*}
+Suppose the pre-learning agent has target-suite success
+$J_{\mathrm{target}}(\theta^-)=50\%$. The oracle clones the same agent three
+times per candidate, trains each clone on that candidate, and then evaluates on
+the same held-out target maze suite. For simplicity, write the averaged result
+directly:
+
+\begin{center}
+\small
+\begin{tabular}{
+  >{\raggedright\arraybackslash}p{0.12\linewidth}
+  >{\raggedright\arraybackslash}p{0.25\linewidth}
+  >{\raggedright\arraybackslash}p{0.28\linewidth}
+  >{\raggedright\arraybackslash}p{0.22\linewidth}
+}
+\toprule
+Level & After-training target success & Oracle value
+$O_{\mathrm{return}}(e_j)$ & Interpretation \\
+\midrule
+$e_1$ & $52\%$ & $+2$ percentage points & Slightly useful. \\
+$e_2$ & $65\%$ & $+15$ percentage points & Most useful. \\
+$e_3$ & $48\%$ & $-2$ percentage points & Harmful or too hard. \\
+\bottomrule
+\end{tabular}
+\end{center}
+
+The oracle ranking is therefore
+\begin{equation}
+  e_2 \succ e_1 \succ e_3.
+\end{equation}
+Now compare cheap scores computed before paying for the full oracle:
+
+\begin{center}
+\footnotesize
+\setlength{\tabcolsep}{3pt}
+\begin{tabular}{@{}
+  >{\raggedright\arraybackslash}p{0.22\linewidth}
+  >{\raggedright\arraybackslash}p{0.14\linewidth}
+  >{\raggedright\arraybackslash}p{0.14\linewidth}
+  >{\raggedright\arraybackslash}p{0.14\linewidth}
+  >{\raggedright\arraybackslash}p{0.18\linewidth}
+@{}}
+\toprule
+Approximation & $A(e_1)$ & $A(e_2)$ & $A(e_3)$ & Proxy pick \\
+\midrule
+Action entropy reduction & $0.10$ & $0.25$ & $0.60$ & $e_3$ \\
+TD error magnitude & $0.20$ & $0.45$ & $0.90$ & $e_3$ \\
+Probe loss reduction & $0.03$ & $0.18$ & $-0.04$ & $e_2$ \\
+PACE parameter change & $0.05$ & $0.30$ & $0.12$ & $e_2$ \\
+Ensemble disagreement reduction & $0.02$ & $0.22$ & $0.01$ & $e_2$ \\
+\bottomrule
+\end{tabular}
+\end{center}
+
+In this toy example, entropy reduction and TD error pick $e_3$ because the hard
+maze causes surprise and sharp policy changes. But the oracle shows that
+training on $e_3$ hurts target performance. Probe loss reduction, PACE parameter
+change, and ensemble disagreement reduction pick $e_2$, matching the oracle
+best environment. The conclusion would be that entropy reduction and TD error
+are detecting disruption or difficulty, while the latter three proxies better
+track useful learning for this checkpoint and environment family.
+
+\subsection{Comparison Criteria}
+
+The oracle comparison should not only ask which score gives the best final
+policy. It should ask whether the approximation tracks the oracle at the level
+of candidate environments:
+\begin{itemize}[leftmargin=*]
+  \item \textbf{Rank correlation}: Spearman or Kendall correlation between
+  $A(e_j)$ and $O(e_j)$ across candidate environments.
+  \item \textbf{Top-$q$ overlap}: fraction of oracle top environments recovered
+  by the approximation.
+  \item \textbf{Selection regret}: oracle value lost by choosing the top
+  approximation-ranked environment instead of the top oracle-ranked
+  environment.
+  \item \textbf{Calibration}: whether score magnitude predicts expected
+  downstream improvement, not just rank.
+  \item \textbf{Robustness}: whether the correlation survives different seeds,
+  training phases, environment families, and target evaluation distributions.
+\end{itemize}
+
+This design turns the conceptual question into a falsifiable experiment. If
+action entropy reduction ranks environments poorly against
+$O_{\mathrm{return}}$, it is merely a decisiveness metric. If PACE or probe-loss
+reduction tracks $O_{\mathrm{return}}$ well, it is a useful single-policy proxy.
+If ensemble disagreement reduction tracks $O_{\mathrm{Bayes}}$ or
+$O_{\mathrm{return}}$, it is a stronger epistemic proxy. If model information
+gain tracks only novelty but not downstream improvement, it may be valuable for
+exploration but insufficient as a curriculum score.
+
+\section{Conclusion}
+
+The first-principles definition of epistemic information gain is expected
+posterior entropy reduction over the latent quantity the agent is uncertain
+about. In RL, action entropy is tempting because it is easy to compute, but it
+mostly measures decisiveness. Entropy collapse is the failure mode where this
+decisiveness appears before reliable knowledge.
+
+For a single non-Bayesian policy, epistemic information gain must be approximated
+by learning-progress metrics such as probe loss reduction, policy-update KL, TD
+error, and held-out behavioral improvement. For an ensemble, disagreement
+reduction gives a useful epistemic proxy. For a Bayesian policy, posterior KL or
+posterior-predictive mutual information gives the cleanest measurement. Recent
+work supplies complementary approximations: PACE uses parameter change, MaxInfoRL
+uses model information gain, MAX uses ensemble disagreement over dynamics, and
+ITTS uses information-theoretic policy relationships between tasks. The strongest
+way to compare these approximations is to construct an expensive oracle that
+measures actual downstream improvement or true posterior change, then evaluate
+which cheap score best predicts the oracle ranking.
+
+\section*{References}
+
+\begin{itemize}[leftmargin=*]
+  \item Shannon, C. E. (1948). A mathematical theory of communication.
+  \item Lindley, D. V. (1956). On a measure of the information provided by an
+  experiment.
+  \item MacKay, D. J. C. (1992). Information-based objective functions for
+  active data selection.
+  \item Gal, Y., Islam, R., and Ghahramani, Z. (2017). Deep Bayesian active
+  learning with image data.
+  \item Haarnoja, T., Zhou, A., Abbeel, P., and Levine, S. (2018). Soft
+  actor-critic: Off-policy maximum entropy deep reinforcement learning with a
+  stochastic actor.
+  \item Schulman, J., Wolski, F., Dhariwal, P., Radford, A., and Klimov, O.
+  (2017). Proximal policy optimization algorithms.
+  \item Yuan, F., Yin, Q., Shen, S., Xie, Y., Yang, J., Qin, L., Zeng, J., and
+  Li, Q. (2026). PACE: Parameter Change for Unsupervised Environment Design.
+  \href{https://arxiv.org/abs/2605.01358}{arXiv:2605.01358}.
+  \item Sukhija, B., Coros, S., Krause, A., Abbeel, P., and Sferrazza, C.
+  (2025). MaxInfoRL: Boosting exploration in reinforcement learning through
+  information gain maximization. ICLR.
+  \href{https://sukhijab.github.io/projects/maxinforl/}{Project page}.
+  \item Shyam, P., Jaskowski, W., and Gomez, F. (2019). Model-Based Active
+  Exploration. ICML.
+  \href{https://proceedings.mlr.press/v97/shyam19a.html}{PMLR 97}.
+  \item Luna Gutierrez, R., and Leonetti, M. (2020). Information-theoretic Task
+  Selection for Meta-Reinforcement Learning. NeurIPS.
+  \href{https://arxiv.org/abs/2011.01054}{arXiv:2011.01054}.
+  \item Rutherford, A., Beukman, M., Willi, T., Lacerda, B., Hawes, N., and
+  Foerster, J. (2024). No Regrets: Investigating and Improving Regret
+  Approximations for Curriculum Discovery. NeurIPS.
+  \href{https://arxiv.org/abs/2408.15099}{arXiv:2408.15099}.
+\end{itemize}
+
+\end{document}
