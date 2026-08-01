@@ -6,7 +6,7 @@ import numpy as np
 import jax
 import jax.numpy as jnp
 from jaxued.environments.underspecified_env import EnvParams, EnvState, UnderspecifiedEnv
-from jaxued.utils import compute_max_mean_returns_epcount
+from jaxued.metrics import compute_max_mean_returns_epcount
 import optax
 from flax import struct
 from flax.training.train_state import TrainState as BaseTrainState

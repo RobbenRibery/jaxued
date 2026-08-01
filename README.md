@@ -24,9 +24,18 @@ JaxUED is a Unsupervised Environment Design (UED) library with similar goals to 
 - Wandb integration and logging of metrics and generated levels
 
 ### What We Provide
-JaxUED has several (Jaxified) utilities that are useful for implementing UED methods, a `LevelSampler`, a general environment interface `UnderspecifiedEnv`, and a Maze implementation. 
+JaxUED has several (Jaxified) utilities that are useful for implementing UED
+methods, a `LevelSampler`, a general environment interface
+`UnderspecifiedEnv`, typed environment-utility metric interfaces, and a Maze
+implementation.
 
-We also have understandable single-file implementations of DR, PLR, ACCEL and PAIRED.
+Environment utility measurement is kept separate from level storage and
+sampling. The existing MaxMC and positive value-loss metrics are available from
+`jaxued.metrics`, and compatible project-specific metrics can be selected
+through `MetricRegistry`.
+
+We also have understandable single-file implementations of DR, PLR, ACCEL,
+PAIRED, and persistent-ensemble PLR with virtual learning-progress scoring.
 
 ### Who JaxUED is for
 JaxUED is primarily intended for researchers looking to get *in the weeds* of UED algorithm development. Our minimal dependency implementations of the current state-of-the art UED methods expose all implementation details; helping researchers understand how the algorithms work in practise, and facilitating easy, rapid prototyping of new ideas. 
@@ -50,7 +59,9 @@ pip install --upgrade "jax[cuda12_pip]" -f https://storage.googleapis.com/jax-re
 ```
 
 ### Training
-We provide three example files, `examples/maze_{dr,plr,paired}.py` implementing DR, PLR (and ACCEL) & PAIRED, respectively.
+The Maze examples include `examples/maze_{dr,plr,paired}.py` plus
+`examples/maze_ensemble_plr.py`, which implements ensemble disagreement
+reduction with isolated virtual PPO updates.
 
 To run them, simply run the scripts directly. See the [documentation](https://dramacow.github.io/jaxued/) or the files themselves for arguments.
 
@@ -80,6 +91,7 @@ states, cum_rewards, episode_lengths, levels
 | [Robust Prioritized Level Replay (RPLR)](https://arxiv.org/abs/2110.02439) | `python examples/maze_plr.py`                            |
 | [ACCEL](https://arxiv.org/abs/2203.01302)                                           | `python examples/maze_plr.py --use_accel`                |
 | [PAIRED](https://arxiv.org/abs/2012.02096)                                          | `python examples/maze_paired.py`                         |
+| Ensemble virtual learning progress                                                  | `python examples/maze_ensemble_plr.py --num_agents 8`    |
 
 ## Modification
 One of the core goals of JaxUED is that our reference implementations can easily be modified to add arbitrary functionality. All of the primary functionality is provided in the file, from the PPO implementation to the specifics of each method. 

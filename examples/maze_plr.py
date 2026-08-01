@@ -1,6 +1,6 @@
 import json
 import time
-from typing import Sequence, Tuple
+from typing import Optional, Sequence, Tuple
 import numpy as np
 import jax
 import jax.numpy as jnp
@@ -18,7 +18,13 @@ from jaxued.linen import ResetRNN
 from jaxued.environments import Maze, MazeRenderer
 from jaxued.environments.maze import Level, make_level_generator, make_level_mutator_minimax
 from jaxued.level_sampler import LevelSampler
-from jaxued.utils import compute_max_returns, max_mc, positive_value_loss
+from jaxued.metrics import (
+    MetricRegistry,
+    RolloutMetricInputs,
+    compute_max_returns,
+    compute_rollout_utility,
+    create_rollout_metric_registry,
+)
 from jaxued.wrappers import AutoReplayWrapper
 import chex
 from enum import IntEnum
@@ -386,15 +392,22 @@ def train_state_to_log_dict(train_state: TrainState, level_sampler: LevelSampler
         }
     }
 
-def compute_score(config, dones, values, max_returns, advantages):
-    if config['score_function'] == "MaxMC":
-        return max_mc(dones, values, max_returns)
-    elif config['score_function'] == "pvl":
-        return positive_value_loss(dones, advantages)
-    else:
-        raise ValueError(f"Unknown score function: {config['score_function']}")
+def main(
+    config=None,
+    project="JAXUED_TEST",
+    metric_registry: Optional[MetricRegistry[RolloutMetricInputs]] = None,
+):
+    """Run Maze PLR/ACCEL training with a configurable utility registry.
 
-def main(config=None, project="JAXUED_TEST"):
+    Args:
+        config: Training configuration accepted by Weights & Biases.
+        project: Weights & Biases project name.
+        metric_registry: Optional registry of rollout-compatible environment
+            utility metrics. Defaults to JaxUED's built-in MaxMC/PVL registry.
+
+    Returns:
+        Final training state.
+    """
     tags = []
     if not config["exploratory_grad_updates"]:
         tags.append("robust")
@@ -404,6 +417,9 @@ def main(config=None, project="JAXUED_TEST"):
         tags.append("PLR")
     run = wandb.init(config=config, project=project, group=config["run_name"], tags=tags)
     config = wandb.config
+    if metric_registry is None:
+        metric_registry = create_rollout_metric_registry()
+    utility_metric = metric_registry.resolve(config["score_function"])
     
     wandb.define_metric("num_updates")
     wandb.define_metric("num_env_steps")
@@ -544,7 +560,13 @@ def main(config=None, project="JAXUED_TEST"):
             )
             advantages, targets = compute_gae(config["gamma"], config["gae_lambda"], last_value, values, rewards, dones)
             max_returns = compute_max_returns(dones, rewards)
-            scores = compute_score(config, dones, values, max_returns, advantages)
+            scores = compute_rollout_utility(
+                utility_metric,
+                dones=dones,
+                values=values,
+                max_returns=max_returns,
+                advantages=advantages,
+            )
             sampler, _ = level_sampler.insert_batch(sampler, new_levels, scores, {"max_return": max_returns})
             
             # Update: train_state only modified if exploratory_grad_updates is on
@@ -602,7 +624,13 @@ def main(config=None, project="JAXUED_TEST"):
             )
             advantages, targets = compute_gae(config["gamma"], config["gae_lambda"], last_value, values, rewards, dones)
             max_returns = jnp.maximum(level_sampler.get_levels_extra(sampler, level_inds)["max_return"], compute_max_returns(dones, rewards))
-            scores = compute_score(config, dones, values, max_returns, advantages)
+            scores = compute_rollout_utility(
+                utility_metric,
+                dones=dones,
+                values=values,
+                max_returns=max_returns,
+                advantages=advantages,
+            )
             sampler = level_sampler.update_batch(sampler, level_inds, scores, {"max_return": max_returns})
             
             # Update the policy using trajectories collected from replay levels
@@ -664,7 +692,13 @@ def main(config=None, project="JAXUED_TEST"):
             )
             advantages, targets = compute_gae(config["gamma"], config["gae_lambda"], last_value, values, rewards, dones)
             max_returns = compute_max_returns(dones, rewards)
-            scores = compute_score(config, dones, values, max_returns, advantages)
+            scores = compute_rollout_utility(
+                utility_metric,
+                dones=dones,
+                values=values,
+                max_returns=max_returns,
+                advantages=advantages,
+            )
             sampler, _ = level_sampler.insert_batch(sampler, child_levels, scores, {"max_return": max_returns})
             
             # Update: train_state only modified if exploratory_grad_updates is on
@@ -872,7 +906,12 @@ if __name__=="__main__":
     group.add_argument("--entropy_coeff", type=float, default=1e-3)
     group.add_argument("--critic_coeff", type=float, default=0.5)
     # === PLR ===
-    group.add_argument("--score_function", type=str, default="MaxMC", choices=["MaxMC", "pvl"])
+    group.add_argument(
+        "--score_function",
+        type=str,
+        default="MaxMC",
+        choices=create_rollout_metric_registry().names,
+    )
     group.add_argument("--exploratory_grad_updates", action=argparse.BooleanOptionalAction, default=False)
     group.add_argument("--level_buffer_capacity", type=int, default=4000)
     group.add_argument("--replay_prob", type=float, default=0.8)

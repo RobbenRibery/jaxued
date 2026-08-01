@@ -16,7 +16,6 @@ from jaxued.environments.underspecified_env import EnvParams, EnvState, Observat
 from jaxued.linen import ResetRNN
 from jaxued.environments import Maze, MazeRenderer
 from jaxued.environments.maze import Level, make_level_generator
-from jaxued.utils import max_mc, positive_value_loss
 from jaxued.wrappers import AutoResetWrapper
 import chex
 
@@ -343,14 +342,6 @@ def setup_checkpointing(config: dict, train_state: TrainState, env: Underspecifi
     )
     return checkpoint_manager
 #endregion
-
-def compute_score(config, dones, values, max_returns, advantages):
-    if config['score_function'] == "MaxMC":
-        return max_mc(dones, values, max_returns)
-    elif config['score_function'] == "pvl":
-        return positive_value_loss(dones, advantages)
-    else:
-        raise ValueError(f"Unknown score function: {config['score_function']}")
 
 def main(config=None, project="JAXUED_TEST"):
     run = wandb.init(config=config, project=project, group=config["group_name"], tags=["DR",])

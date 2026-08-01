@@ -2,14 +2,40 @@ import subprocess
 import pytest
 import os
 import sys
-import time
 
 EXAMPLES_DIR = os.path.join(os.path.dirname(__file__), "../examples")
 EXAMPLE_SCRIPTS = [
     "maze_dr.py",
     "maze_plr.py",
+    "maze_ensemble_plr.py",
     "maze_paired.py",
 ]
+
+EXAMPLE_ARGUMENTS = {
+    "maze_ensemble_plr.py": [
+        "--num_agents",
+        "2",
+        "--num_updates",
+        "1",
+        "--eval_freq",
+        "1",
+        "--eval_num_attempts",
+        "1",
+        "--eval_levels",
+        "StandardMaze",
+        "--num_steps",
+        "2",
+        "--num_train_envs",
+        "2",
+        "--epoch_ppo",
+        "1",
+        "--level_buffer_capacity",
+        "4",
+        "--n_walls",
+        "5",
+        "--no-buffer_duplicate_check",
+    ],
+}
 
 @pytest.mark.parametrize("script", EXAMPLE_SCRIPTS)
 def test_run_example(script):
@@ -21,7 +47,7 @@ def test_run_example(script):
 
     try:
         process = subprocess.run(
-            [sys.executable, script_path],
+            [sys.executable, script_path, *EXAMPLE_ARGUMENTS.get(script, [])],
             stdout=subprocess.PIPE,
             stderr=subprocess.PIPE,
             timeout=30,
