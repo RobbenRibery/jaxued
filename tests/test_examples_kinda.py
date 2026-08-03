@@ -12,6 +12,27 @@ EXAMPLE_SCRIPTS = [
 ]
 
 EXAMPLE_ARGUMENTS = {
+    "maze_plr.py": [
+        "--num_updates",
+        "1",
+        "--eval_freq",
+        "1",
+        "--eval_num_attempts",
+        "1",
+        "--eval_levels",
+        "StandardMaze",
+        "--num_steps",
+        "2",
+        "--num_train_envs",
+        "2",
+        "--epoch_ppo",
+        "1",
+        "--level_buffer_capacity",
+        "4",
+        "--n_walls",
+        "5",
+        "--no-buffer_duplicate_check",
+    ],
     "maze_ensemble_plr.py": [
         "--num_agents",
         "2",

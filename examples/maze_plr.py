@@ -392,6 +392,13 @@ def train_state_to_log_dict(train_state: TrainState, level_sampler: LevelSampler
         }
     }
 
+
+def _agent_log_metrics(losses):
+    """Aggregate PPO Agent metrics across one logging interval."""
+    _, (_, _, entropy) = losses
+    return {"agent/entropy": entropy.mean()}
+
+
 def main(
     config=None,
     project="JAXUED_TEST",
@@ -438,6 +445,7 @@ def main(
             "num_updates": stats["update_count"],
             "num_env_steps": env_steps,
             "sps": env_steps / stats['time_delta'],
+            **_agent_log_metrics(stats["losses"]),
         }
         
         # evaluation performance
