@@ -6,10 +6,10 @@ environment state, collect their own stochastic on-policy trajectory, and
 train only on that trajectory.
 
 The level score is the signed reduction in ensemble action-distribution
-disagreement after an isolated virtual PPO update.  Its support is frozen to
-physical states visited during the original rollouts.  Post-update recurrent
-states are reconstructed from zero by replaying the stored observation/reset
-sequence; the environment is never stepped during this replay.
+disagreement after isolated multi-phase virtual PPO learning. Its support is
+frozen to the union of physical states visited across virtual phases. Original
+and final recurrent states are reconstructed from zero by replaying the same
+stored observation/reset sequences.
 """
 
 from __future__ import annotations
@@ -19,6 +19,7 @@ import json
 import os
 import time
 from enum import IntEnum
+from functools import partial
 from typing import Any, NamedTuple
 
 import chex
@@ -144,6 +145,46 @@ class ScoredEnsembleRollout(NamedTuple):
 
     disagreement: EnsembleDisagreementResult
     post_update_action_probabilities: chex.Array
+
+
+class VirtualLearningParameters(NamedTuple):
+    """Static controls for isolated multi-phase virtual learning.
+
+    Attributes:
+        ppo: PPO parameters used only by the discarded virtual clones.
+        num_phases: Number of rollout-then-PPO phases per candidate level.
+        level_batch_size: Candidate levels evaluated concurrently by
+            :func:`jax.lax.map`.
+    """
+
+    ppo: PPOParameters
+    num_phases: int
+    level_batch_size: int
+
+
+class VirtualProbeTrajectory(NamedTuple):
+    """Minimal recurrent probe sequence retained from one virtual phase."""
+
+    observations: Observation
+    resets: chex.Array
+    state_ids: chex.Array
+
+
+class VirtualLearningDiagnostics(NamedTuple):
+    """Per-level support and policy-change diagnostics."""
+
+    union_visited_state_count: chex.Array
+    mean_distinct_visitors: chex.Array
+    eligible_state_coverage: chex.Array
+    new_state_count_by_phase: chex.Array
+    policy_kl: chex.Array
+
+
+class VirtualLearningResult(NamedTuple):
+    """Environment scores and diagnostics from discarded virtual learning."""
+
+    disagreement: EnsembleDisagreementResult
+    diagnostics: VirtualLearningDiagnostics
 
 
 def encode_maze_state(env_state: Any, max_width: int) -> chex.Array:
@@ -428,6 +469,412 @@ def score_ensemble_rollout(
     return ScoredEnsembleRollout(disagreement, post_update_probabilities)
 
 
+def trajectory_to_virtual_probe(
+    trajectory: EnsembleTrajectory,
+) -> VirtualProbeTrajectory:
+    """Discard training-only fields while retaining recurrent probe inputs."""
+    return VirtualProbeTrajectory(
+        observations=trajectory.observations,
+        resets=trajectory.resets,
+        state_ids=trajectory.state_ids,
+    )
+
+
+def update_virtual_level_members(
+    update_rngs: chex.Array,
+    agents: BaseTrainState,
+    trajectory: EnsembleTrajectory,
+    last_values: chex.Array,
+    ppo: PPOParameters,
+) -> BaseTrainState:
+    """Update one independent clone per member on one candidate level.
+
+    Args:
+        update_rngs: One PPO key per member, with shape ``(policies, 2)``.
+        agents: Persistent or previous-phase virtual member states.
+        trajectory: Member-specific trajectories with leading dimensions
+            ``(policies, time)``.
+        last_values: Bootstrap value for each member.
+        ppo: PPO constants for the virtual update.
+
+    Returns:
+        Updated virtual member states. The input states remain unchanged.
+    """
+
+    def _update_member(member_rng, agent, member_trajectory, last_value):
+        singleton_trajectory = jax.tree_util.tree_map(
+            lambda value: value[:, None, ...],
+            member_trajectory,
+        )
+        advantages, targets = compute_gae(
+            ppo.gamma,
+            ppo.gae_lambda,
+            last_value[None],
+            singleton_trajectory.values,
+            singleton_trajectory.rewards,
+            singleton_trajectory.dones,
+        )
+        batch = (
+            singleton_trajectory.observations,
+            singleton_trajectory.actions,
+            singleton_trajectory.dones,
+            singleton_trajectory.log_probabilities,
+            singleton_trajectory.values,
+            targets,
+            advantages,
+        )
+        (_, updated_agent), _ = update_actor_critic_rnn(
+            member_rng,
+            agent,
+            ActorCritic.initialize_carry((1,)),
+            batch,
+            num_envs=1,
+            n_steps=singleton_trajectory.actions.shape[0],
+            n_minibatch=1,
+            n_epochs=ppo.num_epochs,
+            clip_eps=ppo.clip_eps,
+            entropy_coeff=ppo.entropy_coeff,
+            critic_coeff=ppo.critic_coeff,
+            update_grad=True,
+        )
+        return updated_agent
+
+    return jax.vmap(_update_member)(
+        update_rngs,
+        agents,
+        trajectory,
+        last_values,
+    )
+
+
+def collect_virtual_level_trajectory(
+    rollout_rngs: chex.Array,
+    env: UnderspecifiedEnv,
+    env_params: EnvParams,
+    agents: BaseTrainState,
+    init_obs: Observation,
+    init_env_state: EnvState,
+    num_steps: int,
+    max_width: int,
+) -> tuple[EnsembleTrajectory, chex.Array]:
+    """Collect one fresh on-policy trajectory per member on one level."""
+    singleton_obs = jax.tree_util.tree_map(
+        lambda value: value[None, ...],
+        init_obs,
+    )
+    singleton_env_state = jax.tree_util.tree_map(
+        lambda value: value[None, ...],
+        init_env_state,
+    )
+    rollout = collect_ensemble_trajectories(
+        rollout_rngs,
+        env,
+        env_params,
+        agents,
+        singleton_obs,
+        singleton_env_state,
+        num_levels=1,
+        num_steps=num_steps,
+        max_width=max_width,
+    )
+    trajectory = jax.tree_util.tree_map(
+        lambda value: jnp.squeeze(value, axis=2),
+        rollout.trajectory,
+    )
+    return trajectory, rollout.last_values[:, 0]
+
+
+def replay_virtual_probe_action_probabilities(
+    agent: BaseTrainState,
+    probe: VirtualProbeTrajectory,
+) -> chex.Array:
+    """Replay one member on one stored phase from a zero recurrent state."""
+    observations = jax.tree_util.tree_map(
+        lambda value: value[:, None, ...],
+        probe.observations,
+    )
+    probabilities = replay_action_probabilities(
+        agent,
+        observations,
+        probe.resets[:, None],
+        ActorCritic.initialize_carry((1,)),
+    )
+    return probabilities[:, 0, :]
+
+
+def run_virtual_phases_for_level(
+    phase_rng: chex.PRNGKey,
+    phase_zero_update_rngs: chex.Array,
+    persistent_agents: BaseTrainState,
+    phase_zero_trajectory: EnsembleTrajectory,
+    phase_zero_last_values: chex.Array,
+    init_obs: Observation,
+    init_env_state: EnvState,
+    env: UnderspecifiedEnv,
+    env_params: EnvParams,
+    num_steps: int,
+    max_width: int,
+    parameters: VirtualLearningParameters,
+) -> tuple[BaseTrainState, VirtualProbeTrajectory]:
+    """Run sequential virtual rollout-PPO phases for one candidate level."""
+    phase_zero_probe = trajectory_to_virtual_probe(phase_zero_trajectory)
+    virtual_agents = update_virtual_level_members(
+        phase_zero_update_rngs,
+        persistent_agents,
+        phase_zero_trajectory,
+        phase_zero_last_values,
+        parameters.ppo,
+    )
+
+    if parameters.num_phases == 1:
+        probes = jax.tree_util.tree_map(
+            lambda value: value[None, ...],
+            phase_zero_probe,
+        )
+        return virtual_agents, probes
+
+    num_additional_phases = parameters.num_phases - 1
+    phase_rngs = jax.random.split(phase_rng, 2 * num_additional_phases)
+    rollout_roots = phase_rngs[:num_additional_phases]
+    update_roots = phase_rngs[num_additional_phases:]
+    num_members = phase_zero_trajectory.state_ids.shape[0]
+    rollout_rngs = jax.vmap(lambda key: jax.random.split(key, num_members))(
+        rollout_roots
+    )
+    update_rngs = jax.vmap(lambda key: jax.random.split(key, num_members))(update_roots)
+
+    def _run_phase(current_agents, phase_keys):
+        phase_rollout_rngs, phase_update_rngs = phase_keys
+        trajectory, last_values = collect_virtual_level_trajectory(
+            phase_rollout_rngs,
+            env,
+            env_params,
+            current_agents,
+            init_obs,
+            init_env_state,
+            num_steps,
+            max_width,
+        )
+        updated_agents = update_virtual_level_members(
+            phase_update_rngs,
+            current_agents,
+            trajectory,
+            last_values,
+            parameters.ppo,
+        )
+        return updated_agents, trajectory_to_virtual_probe(trajectory)
+
+    final_agents, additional_probes = jax.lax.scan(
+        _run_phase,
+        virtual_agents,
+        (rollout_rngs, update_rngs),
+    )
+    probes = jax.tree_util.tree_map(
+        lambda first, later: jnp.concatenate((first[None, ...], later), axis=0),
+        phase_zero_probe,
+        additional_probes,
+    )
+    return final_agents, probes
+
+
+def score_virtual_probe_union(
+    persistent_agents: BaseTrainState,
+    final_virtual_agents: BaseTrainState,
+    probes: VirtualProbeTrajectory,
+    phase_zero_action_probabilities: chex.Array,
+    num_states: int,
+) -> VirtualLearningResult:
+    """Score original-to-final disagreement on the union of phase visits."""
+
+    def _replay_phase(agents, phase_probe):
+        return jax.vmap(replay_virtual_probe_action_probabilities)(
+            agents,
+            phase_probe,
+        )
+
+    if probes.state_ids.shape[0] == 1:
+        before_probabilities = phase_zero_action_probabilities[None, ...]
+    else:
+        additional_probes = jax.tree_util.tree_map(
+            lambda value: value[1:],
+            probes,
+        )
+        additional_before = jax.vmap(
+            lambda phase_probe: _replay_phase(persistent_agents, phase_probe)
+        )(additional_probes)
+        before_probabilities = jnp.concatenate(
+            (phase_zero_action_probabilities[None, ...], additional_before),
+            axis=0,
+        )
+
+    after_probabilities = jax.vmap(
+        lambda phase_probe: _replay_phase(final_virtual_agents, phase_probe)
+    )(probes)
+
+    num_phases, num_members, num_steps = probes.state_ids.shape
+    action_count = before_probabilities.shape[-1]
+    flattened_state_ids = probes.state_ids.transpose(1, 0, 2).reshape(
+        num_members,
+        num_phases * num_steps,
+        1,
+    )
+    flattened_before = before_probabilities.transpose(1, 0, 2, 3).reshape(
+        num_members,
+        num_phases * num_steps,
+        1,
+        action_count,
+    )
+    flattened_after = after_probabilities.transpose(1, 0, 2, 3).reshape(
+        num_members,
+        num_phases * num_steps,
+        1,
+        action_count,
+    )
+    before = aggregate_state_action_probabilities(
+        flattened_state_ids,
+        flattened_before,
+        num_states,
+    )
+    after = aggregate_state_action_probabilities(
+        flattened_state_ids,
+        flattened_after,
+        num_states,
+    )
+    disagreement = compute_ensemble_disagreement_reduction(
+        EnsembleDisagreementInputs(
+            before.action_probabilities,
+            after.action_probabilities,
+            before.visited,
+        )
+    )
+
+    visited = before.visited[0]
+    distinct_visitors = visited.sum(axis=0)
+    eligible = distinct_visitors >= 2
+    union_visited = distinct_visitors >= 1
+    eligible_count = eligible.sum()
+    union_count = union_visited.sum()
+    mean_distinct_visitors = (distinct_visitors * eligible).sum() / jnp.maximum(
+        eligible_count, 1
+    )
+    eligible_state_coverage = eligible_count / jnp.maximum(union_count, 1)
+
+    phase_visited = jax.vmap(
+        lambda ids: jnp.zeros((num_states,), dtype=bool).at[ids.reshape(-1)].set(True)
+    )(probes.state_ids)
+
+    def _count_new_states(seen, current):
+        new_states = current & ~seen
+        return seen | current, new_states.sum()
+
+    _, new_state_count_by_phase = jax.lax.scan(
+        _count_new_states,
+        jnp.zeros((num_states,), dtype=bool),
+        phase_visited,
+    )
+
+    safe_before = jnp.maximum(before.action_probabilities[0], 1e-8)
+    safe_after = jnp.maximum(after.action_probabilities[0], 1e-8)
+    member_state_kl = (
+        before.action_probabilities[0] * (jnp.log(safe_before) - jnp.log(safe_after))
+    ).sum(axis=-1)
+    eligible_visits = visited & eligible[None, :]
+    policy_kl = (member_state_kl * eligible_visits).sum() / jnp.maximum(
+        eligible_visits.sum(), 1
+    )
+
+    scalar_disagreement = EnsembleDisagreementResult(
+        scores=disagreement.scores[0],
+        mean_uncertainty_before=disagreement.mean_uncertainty_before[0],
+        mean_uncertainty_after=disagreement.mean_uncertainty_after[0],
+        eligible_state_count=disagreement.eligible_state_count[0],
+    )
+    diagnostics = VirtualLearningDiagnostics(
+        union_visited_state_count=union_count,
+        mean_distinct_visitors=mean_distinct_visitors,
+        eligible_state_coverage=eligible_state_coverage,
+        new_state_count_by_phase=new_state_count_by_phase,
+        policy_kl=policy_kl,
+    )
+    return VirtualLearningResult(scalar_disagreement, diagnostics)
+
+
+def score_multi_phase_ensemble_rollout(
+    virtual_update_rng: chex.PRNGKey,
+    env: UnderspecifiedEnv,
+    env_params: EnvParams,
+    persistent_agents: BaseTrainState,
+    phase_zero_trajectory: EnsembleTrajectory,
+    phase_zero_last_values: chex.Array,
+    init_obs: Observation,
+    init_env_state: EnvState,
+    num_steps: int,
+    max_width: int,
+    num_states: int,
+    parameters: VirtualLearningParameters,
+) -> VirtualLearningResult:
+    """Evaluate multi-phase virtual learning for a batch of candidate levels."""
+    num_members, _, num_levels = phase_zero_trajectory.state_ids.shape
+    phase_zero_update_rngs = jax.random.split(
+        virtual_update_rng,
+        num_members * num_levels,
+    ).reshape(num_members, num_levels, 2)
+    phase_zero_update_rngs = phase_zero_update_rngs.transpose(1, 0, 2)
+    additional_level_rngs = jax.random.split(
+        jax.random.fold_in(virtual_update_rng, 1),
+        num_levels,
+    )
+    trajectories_by_level = jax.tree_util.tree_map(
+        lambda value: jnp.moveaxis(value, 2, 0),
+        phase_zero_trajectory,
+    )
+    last_values_by_level = phase_zero_last_values.transpose(1, 0)
+
+    def _score_level(inputs):
+        (
+            phase_rng,
+            update_rngs,
+            trajectory,
+            last_values,
+            level_init_obs,
+            level_init_env_state,
+        ) = inputs
+        final_virtual_agents, probes = run_virtual_phases_for_level(
+            phase_rng,
+            update_rngs,
+            persistent_agents,
+            trajectory,
+            last_values,
+            level_init_obs,
+            level_init_env_state,
+            env,
+            env_params,
+            num_steps,
+            max_width,
+            parameters,
+        )
+        return score_virtual_probe_union(
+            persistent_agents,
+            final_virtual_agents,
+            probes,
+            trajectory.action_probabilities,
+            num_states,
+        )
+
+    return jax.lax.map(
+        _score_level,
+        (
+            additional_level_rngs,
+            phase_zero_update_rngs,
+            trajectories_by_level,
+            last_values_by_level,
+            init_obs,
+            init_env_state,
+        ),
+        batch_size=parameters.level_batch_size,
+    )
+
+
 def update_ensemble_members(
     update_rngs: chex.Array,
     agents: BaseTrainState,
@@ -529,9 +976,7 @@ def ensemble_train_state_to_log_dict(
             "level_sampler/weighted_score": (
                 sampler["scores"] * level_sampler.level_weights(sampler)
             ).sum(),
-            "level_sampler/mean_score": (
-                sampler["scores"] * populated
-            ).sum()
+            "level_sampler/mean_score": (sampler["scores"] * populated).sum()
             / safe_size,
         },
         "info": {
@@ -564,6 +1009,12 @@ def _load_ensemble_eval_config(requested_config: dict[str, Any]) -> dict[str, An
         "eval_num_attempts",
     ):
         stored_config[name] = requested_config[name]
+    stored_config.setdefault("virtual_rollout_phases", 1)
+    stored_config.setdefault(
+        "virtual_epoch_ppo",
+        stored_config.get("epoch_ppo", 5),
+    )
+    stored_config.setdefault("virtual_level_batch_size", 1)
     return stored_config
 
 
@@ -623,14 +1074,20 @@ def main(config: Any, project: str = "JAXUED_TEST") -> Any:
 
     if requested_config["num_agents"] < 2:
         raise ValueError("Ensemble disagreement requires at least two agents.")
-    if (
-        requested_config["num_train_envs"]
-        % requested_config["num_minibatches"]
-        != 0
-    ):
+    if requested_config["num_train_envs"] % requested_config["num_minibatches"] != 0:
         raise ValueError("num_train_envs must be divisible by num_minibatches")
     if requested_config["eval_freq"] <= 0:
         raise ValueError("eval_freq must be positive")
+    if requested_config["virtual_rollout_phases"] <= 0:
+        raise ValueError("virtual_rollout_phases must be positive")
+    if requested_config["virtual_epoch_ppo"] <= 0:
+        raise ValueError("virtual_epoch_ppo must be positive")
+    if requested_config["virtual_level_batch_size"] <= 0:
+        raise ValueError("virtual_level_batch_size must be positive")
+    requested_config["resolved_virtual_level_batch_size"] = min(
+        requested_config["virtual_level_batch_size"],
+        requested_config["num_train_envs"],
+    )
 
     tags = ["ensemble-disagreement"]
     if not requested_config["exploratory_grad_updates"]:
@@ -646,6 +1103,9 @@ def main(config: Any, project: str = "JAXUED_TEST") -> Any:
 
     wandb.define_metric("num_updates")
     wandb.define_metric("num_env_steps")
+    wandb.define_metric("num_virtual_env_steps")
+    wandb.define_metric("num_total_env_steps")
+    wandb.define_metric("num_virtual_optimizer_steps")
     for namespace in (
         "solve_rate/*",
         "return/*",
@@ -695,13 +1155,19 @@ def main(config: Any, project: str = "JAXUED_TEST") -> Any:
         entropy_coeff=config["entropy_coeff"],
         critic_coeff=config["critic_coeff"],
     )
+    virtual_learning = VirtualLearningParameters(
+        ppo=ppo._replace(
+            num_minibatches=1,
+            num_epochs=config["virtual_epoch_ppo"],
+        ),
+        num_phases=config["virtual_rollout_phases"],
+        level_batch_size=config["resolved_virtual_level_batch_size"],
+    )
 
     network = ActorCritic(env.action_space(env_params).n)
 
     def _linear_schedule(count):
-        updates_completed = count // (
-            config["num_minibatches"] * config["epoch_ppo"]
-        )
+        updates_completed = count // (config["num_minibatches"] * config["epoch_ppo"])
         fraction_remaining = 1.0 - updates_completed / jnp.maximum(
             config["num_updates"],
             1,
@@ -768,9 +1234,18 @@ def main(config: Any, project: str = "JAXUED_TEST") -> Any:
             num_dr_updates=jnp.asarray(0, dtype=jnp.int32),
             num_replay_updates=jnp.asarray(0, dtype=jnp.int32),
             num_mutation_updates=jnp.asarray(0, dtype=jnp.int32),
-            dr_last_level_batch=placeholder_batch,
-            replay_last_level_batch=placeholder_batch,
-            mutation_last_level_batch=placeholder_batch,
+            # These must be distinct device buffers because the compiled
+            # training segment donates its obsolete runner state. Reusing the
+            # same pytree three times makes XLA observe duplicate donations.
+            dr_last_level_batch=jax.tree_util.tree_map(jnp.copy, placeholder_batch),
+            replay_last_level_batch=jax.tree_util.tree_map(
+                jnp.copy,
+                placeholder_batch,
+            ),
+            mutation_last_level_batch=jax.tree_util.tree_map(
+                jnp.copy,
+                placeholder_batch,
+            ),
         )
 
     def _process_level_batch(
@@ -811,17 +1286,19 @@ def main(config: Any, project: str = "JAXUED_TEST") -> Any:
             base_env.max_width,
         )
 
-        virtual_update_rngs = jax.random.split(
+        virtual_learning_result = score_multi_phase_ensemble_rollout(
             virtual_update_rng,
-            config["num_agents"] * config["num_train_envs"],
-        ).reshape(config["num_agents"], config["num_train_envs"], 2)
-        scored_rollout = score_ensemble_rollout(
-            virtual_update_rngs,
+            env,
+            env_params,
             agents,
             rollout.trajectory,
             rollout.last_values,
-            ppo,
+            init_obs,
+            init_env_state,
+            config["num_steps"],
+            base_env.max_width,
             num_states,
+            virtual_learning,
         )
 
         # This is a separate PPO pass from the virtual copies.  Every
@@ -839,11 +1316,12 @@ def main(config: Any, project: str = "JAXUED_TEST") -> Any:
             rollout.trajectory.rewards,
         )
         max_returns = member_max_returns.max(axis=0)
-        disagreement = scored_rollout.disagreement
+        disagreement = virtual_learning_result.disagreement
+        diagnostics = virtual_learning_result.diagnostics
+        score_zero = jnp.abs(disagreement.scores) <= 1e-8
         metrics = {
             "losses": jax.tree_util.tree_map(jnp.mean, losses),
-            "mean_num_blocks": levels.wall_map.sum()
-            / config["num_train_envs"],
+            "mean_num_blocks": levels.wall_map.sum() / config["num_train_envs"],
             "uncertainty_before": disagreement.mean_uncertainty_before.mean(),
             "uncertainty_after": disagreement.mean_uncertainty_after.mean(),
             "disagreement_reduction": disagreement.scores.mean(),
@@ -851,6 +1329,17 @@ def main(config: Any, project: str = "JAXUED_TEST") -> Any:
             "no_eligible_state_fraction": (
                 disagreement.eligible_state_count == 0
             ).mean(),
+            "union_visited_state_count": (diagnostics.union_visited_state_count.mean()),
+            "mean_distinct_visitors": diagnostics.mean_distinct_visitors.mean(),
+            "eligible_state_coverage": (diagnostics.eligible_state_coverage.mean()),
+            "new_state_count_by_phase": (
+                diagnostics.new_state_count_by_phase.mean(axis=0)
+            ),
+            "policy_kl": diagnostics.policy_kl.mean(),
+            "disagreement_reduction_std": disagreement.scores.std(),
+            "positive_score_fraction": (disagreement.scores > 1e-8).mean(),
+            "zero_score_fraction": score_zero.mean(),
+            "negative_score_fraction": (disagreement.scores < -1e-8).mean(),
         }
         return (
             next_rng,
@@ -896,18 +1385,14 @@ def main(config: Any, project: str = "JAXUED_TEST") -> Any:
                 level_rng,
                 config["num_train_envs"],
             )
-            rng, agents, scores, observed_max_returns, metrics = (
-                _process_level_batch(
-                    rng,
-                    train_state.agents,
-                    levels,
-                    update_grad=True,
-                )
+            rng, agents, scores, observed_max_returns, metrics = _process_level_batch(
+                rng,
+                train_state.agents,
+                levels,
+                update_grad=True,
             )
             max_returns = jnp.maximum(
-                level_sampler.get_levels_extra(sampler, level_indices)[
-                    "max_return"
-                ],
+                level_sampler.get_levels_extra(sampler, level_indices)["max_return"],
                 observed_max_returns,
             )
             sampler = level_sampler.update_batch(
@@ -997,10 +1482,7 @@ def main(config: Any, project: str = "JAXUED_TEST") -> Any:
             init_env_state,
             env_params.max_steps_in_episode,
         )
-        active = (
-            jnp.arange(env_params.max_steps_in_episode)[:, None]
-            < episode_lengths
-        )
+        active = jnp.arange(env_params.max_steps_in_episode)[:, None] < episode_lengths
         returns = (rewards * active).sum(axis=0)
         return states, returns, episode_lengths
 
@@ -1020,7 +1502,7 @@ def main(config: Any, project: str = "JAXUED_TEST") -> Any:
         )
 
     def _make_train_and_eval_step(segment_length: int):
-        @jax.jit
+        @partial(jax.jit, donate_argnums=(0,))
         def _train_and_eval_step(runner_state):
             (rng, train_state), training_metrics = jax.lax.scan(
                 train_step,
@@ -1028,10 +1510,14 @@ def main(config: Any, project: str = "JAXUED_TEST") -> Any:
                 None,
                 length=segment_length,
             )
+            mean_new_state_count_by_phase = training_metrics[
+                "new_state_count_by_phase"
+            ].mean(axis=0)
             training_metrics = jax.tree_util.tree_map(
                 jnp.mean,
                 training_metrics,
             )
+            training_metrics["new_state_count_by_phase"] = mean_new_state_count_by_phase
 
             rng, eval_rng = jax.random.split(rng)
             states, returns, episode_lengths = _evaluate_ensemble(
@@ -1040,18 +1526,10 @@ def main(config: Any, project: str = "JAXUED_TEST") -> Any:
             )
             solved = (returns > 0).astype(jnp.float32)
             aggregate_axes = (0, 1)  # members and stochastic attempts
-            training_metrics["eval_returns_mean"] = returns.mean(
-                axis=aggregate_axes
-            )
-            training_metrics["eval_returns_std"] = returns.std(
-                axis=aggregate_axes
-            )
-            training_metrics["eval_solve_rates_mean"] = solved.mean(
-                axis=aggregate_axes
-            )
-            training_metrics["eval_solve_rates_std"] = solved.std(
-                axis=aggregate_axes
-            )
+            training_metrics["eval_returns_mean"] = returns.mean(axis=aggregate_axes)
+            training_metrics["eval_returns_std"] = returns.std(axis=aggregate_axes)
+            training_metrics["eval_solve_rates_mean"] = solved.mean(axis=aggregate_axes)
+            training_metrics["eval_solve_rates_std"] = solved.std(axis=aggregate_axes)
             training_metrics["eval_ep_lengths_mean"] = episode_lengths.mean(
                 axis=aggregate_axes
             )
@@ -1099,11 +1577,11 @@ def main(config: Any, project: str = "JAXUED_TEST") -> Any:
                 train_state.sampler,
                 level_sampler.level_weights(train_state.sampler).argmax(),
             )
-            training_metrics["highest_scoring_level"] = (
-                env_renderer.render_level(highest_scoring_level, env_params)
+            training_metrics["highest_scoring_level"] = env_renderer.render_level(
+                highest_scoring_level, env_params
             )
-            training_metrics["highest_weighted_level"] = (
-                env_renderer.render_level(highest_weighted_level, env_params)
+            training_metrics["highest_weighted_level"] = env_renderer.render_level(
+                highest_weighted_level, env_params
             )
             return (rng, train_state), training_metrics
 
@@ -1112,7 +1590,7 @@ def main(config: Any, project: str = "JAXUED_TEST") -> Any:
     def _log_eval(stats, train_state_info, segment_length, elapsed):
         update_count = stats["update_count"]
         print(f"Logging update: {int(update_count)}")
-        total_env_steps = (
+        actual_env_steps = (
             update_count
             * config["num_agents"]
             * config["num_train_envs"]
@@ -1124,48 +1602,68 @@ def main(config: Any, project: str = "JAXUED_TEST") -> Any:
             * config["num_train_envs"]
             * config["num_steps"]
         )
+        virtual_env_steps = (
+            update_count
+            * (config["virtual_rollout_phases"] - 1)
+            * config["num_agents"]
+            * config["num_train_envs"]
+            * config["num_steps"]
+        )
+        total_env_steps = actual_env_steps + virtual_env_steps
+        virtual_optimizer_steps = (
+            update_count
+            * config["virtual_rollout_phases"]
+            * config["num_agents"]
+            * config["num_train_envs"]
+            * config["virtual_epoch_ppo"]
+        )
+        segment_total_env_steps = segment_env_steps * config["virtual_rollout_phases"]
         loss, (value_loss, policy_loss, entropy) = stats["losses"]
         log_dict = {
             "num_updates": update_count,
-            "num_env_steps": total_env_steps,
+            "num_env_steps": actual_env_steps,
+            "num_virtual_env_steps": virtual_env_steps,
+            "num_total_env_steps": total_env_steps,
+            "num_virtual_optimizer_steps": virtual_optimizer_steps,
             "sps": segment_env_steps / elapsed,
+            "total_sps": segment_total_env_steps / elapsed,
             "agent/loss": loss,
             "agent/value_loss": value_loss,
             "agent/policy_loss": policy_loss,
             "agent/entropy": entropy,
             "ensemble/uncertainty_before": stats["uncertainty_before"],
             "ensemble/uncertainty_after": stats["uncertainty_after"],
-            "ensemble/disagreement_reduction": stats[
-                "disagreement_reduction"
-            ],
+            "ensemble/disagreement_reduction": stats["disagreement_reduction"],
             "ensemble/eligible_state_count": stats["eligible_state_count"],
-            "ensemble/no_eligible_state_fraction": stats[
-                "no_eligible_state_fraction"
-            ],
+            "ensemble/no_eligible_state_fraction": stats["no_eligible_state_fraction"],
+            "ensemble/union_visited_state_count": stats["union_visited_state_count"],
+            "ensemble/mean_distinct_visitors": stats["mean_distinct_visitors"],
+            "ensemble/eligible_state_coverage": stats["eligible_state_coverage"],
+            "ensemble/original_to_final_policy_kl": stats["policy_kl"],
+            "ensemble/disagreement_reduction_std": stats["disagreement_reduction_std"],
+            "ensemble/positive_score_fraction": stats["positive_score_fraction"],
+            "ensemble/zero_score_fraction": stats["zero_score_fraction"],
+            "ensemble/negative_score_fraction": stats["negative_score_fraction"],
             "levels/mean_num_blocks": stats["mean_num_blocks"],
         }
+        for phase_index in range(config["virtual_rollout_phases"]):
+            log_dict[f"ensemble/new_state_count_phase_{phase_index + 1}"] = stats[
+                "new_state_count_by_phase"
+            ][phase_index]
 
         for index, level_name in enumerate(config["eval_levels"]):
-            log_dict[f"solve_rate/{level_name}/mean"] = stats[
-                "eval_solve_rates_mean"
-            ][index]
-            log_dict[f"solve_rate/{level_name}/std"] = stats[
-                "eval_solve_rates_std"
-            ][index]
-            log_dict[f"return/{level_name}/mean"] = stats[
-                "eval_returns_mean"
-            ][index]
-            log_dict[f"return/{level_name}/std"] = stats[
-                "eval_returns_std"
-            ][index]
+            log_dict[f"solve_rate/{level_name}/mean"] = stats["eval_solve_rates_mean"][
+                index
+            ]
+            log_dict[f"solve_rate/{level_name}/std"] = stats["eval_solve_rates_std"][
+                index
+            ]
+            log_dict[f"return/{level_name}/mean"] = stats["eval_returns_mean"][index]
+            log_dict[f"return/{level_name}/std"] = stats["eval_returns_std"][index]
         log_dict["solve_rate/mean"] = stats["eval_solve_rates_mean"].mean()
         log_dict["return/mean"] = stats["eval_returns_mean"].mean()
-        log_dict["return/member_attempt_std_mean"] = stats[
-            "eval_returns_std"
-        ].mean()
-        log_dict["eval_ep_lengths/mean"] = stats[
-            "eval_ep_lengths_mean"
-        ].mean()
+        log_dict["return/member_attempt_std_mean"] = stats["eval_returns_std"].mean()
+        log_dict["eval_ep_lengths/mean"] = stats["eval_ep_lengths_mean"].mean()
         log_dict["eval_ep_lengths/std"] = stats["eval_ep_lengths_std"].mean()
         log_dict.update(train_state_info["log"])
 
@@ -1313,6 +1811,9 @@ def build_parser() -> argparse.ArgumentParser:
     training.add_argument("--num_minibatches", type=int, default=1)
     training.add_argument("--gamma", type=float, default=0.995)
     training.add_argument("--epoch_ppo", type=int, default=5)
+    training.add_argument("--virtual_rollout_phases", type=int, default=3)
+    training.add_argument("--virtual_epoch_ppo", type=int, default=5)
+    training.add_argument("--virtual_level_batch_size", type=int, default=32)
     training.add_argument("--clip_eps", type=float, default=0.2)
     training.add_argument("--gae_lambda", type=float, default=0.98)
     training.add_argument("--entropy_coeff", type=float, default=1e-3)

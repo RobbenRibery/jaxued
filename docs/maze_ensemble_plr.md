@@ -1,127 +1,181 @@
 # Maze Ensemble PLR
 
-`examples/maze_ensemble_plr.py` scores a level by asking whether one isolated
-PPO update makes independently initialized policies agree more on the physical
-states they actually encountered.
+`examples/maze_ensemble_plr.py` scores a level by asking whether isolated,
+multi-phase virtual learning makes independently initialized policies agree
+more on the union of physical states they encounter.
 
 ## One scoring pass
 
 For each candidate level, the implementation performs one trial:
 
-1. Instantiate the level once and give every persistent ensemble member the
-   same initial observation, environment state, and zero recurrent carry.
-2. Give every member distinct rollout randomness. Each member samples its own
-   actions and collects its own on-policy trajectory.
-3. At every pre-action decision point, freeze the observation, previous-done
-   reset flag, action distribution, and physical Maze state.
-4. For every member-level pair, clone both policy and optimizer state, run PPO
-   only on that member's trajectory for that level, and discard the clone after
-   scoring.
-5. Starting from a fresh recurrent carry, run the updated policy over the exact
-   stored observation/reset sequence. No environment step, new state, or new
-   action is generated during this replay.
-6. Compute the signed disagreement reduction and use it as the level score.
-7. Separately update each persistent member on its own full rollout batch.
-   Replay updates always train; new and mutated levels train only with
+1. Instantiate the level once and give every persistent member the same
+   initial observation, environment state, and zero recurrent carry.
+2. Give every member distinct rollout randomness and collect the phase-zero
+   on-policy trajectory.
+3. For every member-level pair, clone both policy and optimizer state and run
+   PPO only on that member's trajectory for that level.
+4. For each additional virtual phase, reset the clone to the exact same
+   instantiated environment state and zero recurrent carry, collect a fresh
+   on-policy trajectory with the updated clone, and train on that trajectory.
+5. At every pre-action decision point in every phase, retain the observation,
+   previous-done reset flag, and physical Maze state.
+6. Replay the original persistent policy and final virtual policy over those
+   same sequences, reconstructing their separate recurrent carries.
+7. Compute signed disagreement reduction on the union of phase visits and use
+   it as the level score. All virtual state is then discarded.
+8. Separately update each persistent member on only its phase-zero full
+   rollout. Replay updates always train; new and mutated levels train only with
    `--exploratory_grad_updates`.
+
+For member (i), level (e), and virtual phase (k), the rollout is
+
+\[
+\tau_{i,e}^{k}
+\sim
+p(\tau \mid \theta_{i,e}^{k},x_e^0,\xi_{i,e}^{k}),
+\]
+
+followed by
+
+\[
+(\theta_{i,e}^{k+1},m_{i,e}^{k+1})
+=
+\operatorname{PPO}
+(\theta_{i,e}^{k},m_{i,e}^{k},\tau_{i,e}^{k}).
+\]
+
+The default is three rollout-PPO phases and five PPO epochs per phase. Every
+trajectory is on-policy for its current virtual clone. Only the first
+trajectory is eligible for persistent training.
+
+## Visited-state support
 
 The physical state is the pose
 
 \[
-z = (x, y, d),
+z=(x,y,d),
 \]
 
-encoded in code as
+encoded as
 
 \[
-\operatorname{id}(z) = 4 (y W + x) + d.
+\operatorname{id}(z)=4(yW+x)+d.
 \]
 
 Elapsed episode time is not part of the state identity.
 
-For level \(e\), the policies that visited state \(z\) are
+For member (i), define the occurrences of state (z) across every virtual
+phase as
 
 \[
-\mathcal{V}_{e,z}
+O_{i,e}(z)
 =
-\{ i \in \{1,\ldots,N\} : \exists t,\ z_{i,e,t}=z \}.
+\{(k,t):z_{i,e,k,t}=z\}.
 \]
 
-Only states with at least two distinct visitors are eligible:
+The member-level visitor indicator is
 
 \[
-\mathcal{S}_e
+V_{i,e}(z)
 =
-\{ z : |\mathcal{V}_{e,z}| \ge 2 \}.
+1\{|O_{i,e}(z)|>0\}.
+\]
+
+Only states visited by at least two distinct members are eligible:
+
+\[
+S_e
+=
+\{z:\sum_i V_{i,e}(z)\ge2\}.
 \]
 
 If one policy visits the same state repeatedly, its action distributions are
-averaged before it contributes one vote. Let \(\bar{\pi}^{-}_{i,e,z}\) and
-\(\bar{\pi}^{+}_{i,e,z}\) denote those pre-update and post-update votes. For
-either sign \(q \in \{-,+\}\), state-level epistemic uncertainty is
+averaged across phase-timestep occurrences before it contributes one vote. Let
+\(\bar{\pi}^{-}_{i,e,z}\) and \(\bar{\pi}^{+}_{i,e,z}\) denote the original and
+final virtual policy votes on exactly the same occurrences. For either sign
+\(q\in\{-,+\}\), state-level epistemic uncertainty is
 
 \[
 U^{q}_{e,z}
 =
 H\!\left(
-\frac{1}{|\mathcal{V}_{e,z}|}
-\sum_{i \in \mathcal{V}_{e,z}}
-\bar{\pi}^{q}_{i,e,z}
+\frac{1}{\sum_i V_{i,e}(z)}
+\sum_i V_{i,e}(z)\bar{\pi}^{q}_{i,e,z}
 \right)
 -
-\frac{1}{|\mathcal{V}_{e,z}|}
-\sum_{i \in \mathcal{V}_{e,z}}
+\frac{1}{\sum_i V_{i,e}(z)}
+\sum_i V_{i,e}(z)
 H\!\left(\bar{\pi}^{q}_{i,e,z}\right).
 \]
 
-The environment-level score is the simple signed mean reduction
+The environment-level score is
 
 \[
 \operatorname{score}(e)
 =
-\frac{1}{|\mathcal{S}_e|}
-\sum_{z \in \mathcal{S}_e}
-\left(U^{-}_{e,z} - U^{+}_{e,z}\right).
+\frac{1}{|S_e|}
+\sum_{z\in S_e}
+\left(U^{-}_{e,z}-U^{+}_{e,z}\right).
 \]
 
-If \(\mathcal{S}_e\) is empty, the implementation returns zero. Scores are not
-clipped: a negative value records increased disagreement after virtual
-learning.
+If (S_e) is empty, the implementation returns zero. Scores are not clipped:
+a negative value records increased disagreement after virtual learning.
 
 ## Why recurrent replay is valid here
 
 The Maze actor's action distribution is determined by its parameters, current
 observation, and LSTM carry. Its recurrent input does not include the previous
-action or reward. The carry at every stored decision point can therefore be
-reconstructed by starting at the standard zero carry and scanning the stored
-observations with the stored previous-done flags. Post-update carries are never
-copied from the pre-update rollout.
+action or reward. For every phase, the original and final policies start from
+separate zero carries and scan the same stored observations with the same
+previous-done flags. Hidden states are never copied between policies or
+phases.
+
+Later-phase trajectories are off-policy inputs for the original policy replay,
+but they are used only to evaluate its action distribution. PPO training in
+every phase remains on-policy for the virtual clone that generated that phase.
 
 ## Run
 
 ```bash
-python examples/maze_ensemble_plr.py --num_agents 8
+python examples/maze_ensemble_plr.py \
+  --num_agents 8 \
+  --virtual_rollout_phases 3 \
+  --virtual_epoch_ppo 5 \
+  --virtual_level_batch_size 32
 ```
 
-`--num_train_envs` is the number of candidate levels scored together. A virtual
-update always uses one level and one PPO minibatch; `--num_minibatches` controls
-the later persistent update over the full level batch. All other PLR and ACCEL
-arguments mirror `maze_plr.py` except that `--score_function` is intentionally
-absent: this runner always uses ensemble disagreement reduction.
+`--num_train_envs` is the number of candidate levels scored together. A
+virtual phase uses one level and one PPO minibatch; `--num_minibatches`
+controls the persistent update over the full level batch. Candidate levels are
+processed concurrently in memory-bounded groups selected by
+`--virtual_level_batch_size`.
 
-Environment-step accounting includes all member rollouts:
+All other PLR and ACCEL arguments mirror `maze_plr.py` except that
+`--score_function` is intentionally absent: this runner always uses ensemble
+disagreement reduction.
+
+Actual environment-step accounting remains
 
 \[
-\text{environment steps per update}
+\text{actual steps per update}
 =
-N \times \text{num train envs} \times \text{num steps}.
+N\times\text{num train envs}\times\text{num steps}.
+\]
+
+With (K) virtual phases, total environment simulation is
+
+\[
+\text{total steps per update}
+=
+K\times N\times\text{num train envs}\times\text{num steps}.
 \]
 
 ## Evaluation and checkpoints
 
 Checkpoints use the dedicated `jaxued-maze-ensemble-v1` format and contain all
-member parameters, all optimizer states, and the shared sampler. They are not
-interchangeable with single-policy Maze checkpoints.
+member parameters, optimizer states, and shared sampler state. New
+virtual-learning controls live in the stored configuration; old ensemble
+checkpoints receive compatibility defaults during evaluation.
 
 Evaluation reports the mean and standard deviation across ensemble members and
 stochastic attempts. Videos use member 0, attempt 0 only.

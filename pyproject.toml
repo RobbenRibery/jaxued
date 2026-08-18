@@ -46,6 +46,9 @@ examples = [
     "imageio",
     "moviepy"
 ]
+modal = [
+    "modal>=1.0,<2",
+]
 
 [project.urls]
 Homepage = "https://github.com/dramacow/jaxued"

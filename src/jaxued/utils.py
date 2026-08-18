@@ -10,6 +10,8 @@ from jaxued.metrics.rollout import (
     compute_max_mean_returns_epcount,
     compute_max_returns,
     max_mc,
+    mean_absolute_advantage,
+    mean_positive_delight,
     positive_value_loss,
 )
 
@@ -18,5 +20,7 @@ __all__ = [
     "compute_max_mean_returns_epcount",
     "compute_max_returns",
     "max_mc",
+    "mean_absolute_advantage",
+    "mean_positive_delight",
     "positive_value_loss",
 ]

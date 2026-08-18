@@ -8,7 +8,7 @@ This file is based on the UED score implementation in Minimax:
 https://github.com/facebookresearch/minimax/blob/2ae9e04d37f97d7c14308f5a26237dcfca63470f/src/minimax/util/rl/ued_scores.py
 """
 
-from typing import NamedTuple, Tuple
+from typing import NamedTuple, Optional, Tuple
 
 import chex
 import jax
@@ -27,12 +27,15 @@ class RolloutMetricInputs(NamedTuple):
             shape ``(environments,)``.
         advantages: Generalized advantage estimates with shape
             ``(time, environments)``.
+        log_probs: Optional collection-time action log-probabilities with shape
+            ``(time, environments)``. Legacy metrics do not require this field.
     """
 
     dones: chex.Array
     values: chex.Array
     max_returns: chex.Array
     advantages: chex.Array
+    log_probs: Optional[chex.Array] = None
 
 
 def accumulate_rollout_stats(
@@ -220,6 +223,59 @@ def positive_value_loss(
     return jnp.where(episode_count > 0, mean_scores, incomplete_value)
 
 
+def mean_positive_delight(
+    dones: chex.Array,
+    advantages: chex.Array,
+    log_probs: chex.Array,
+    incomplete_value: float = -jnp.inf,
+) -> chex.Array:
+    """Compute mean positive delight for each environment.
+
+    Per-step delight is the product of the GAE residual and the sampled
+    action's collection-time surprisal, ``advantage * -log_prob``. Negative
+    delight is clipped to zero before values are time-averaged within completed
+    episodes and then averaged across completed episodes. For discrete action
+    distributions, this is equivalently surprisal-weighted positive value loss.
+
+    Args:
+        dones: Episode-completion mask with shape ``(time, environments)``.
+        advantages: Generalized advantage estimates with shape
+            ``(time, environments)``.
+        log_probs: Collection-time action log-probabilities with shape
+            ``(time, environments)``.
+        incomplete_value: Score assigned to environments without a completed
+            episode in the rollout.
+
+    Returns:
+        Mean positive-delight scores with shape ``(environments,)``.
+    """
+    delight = advantages * -log_probs
+    mean_scores, _, episode_count = accumulate_rollout_stats(
+        dones,
+        jnp.maximum(delight, 0),
+        time_average=True,
+    )
+    return jnp.where(episode_count > 0, mean_scores, incomplete_value)
+
+
+def mean_absolute_advantage(advantages: chex.Array) -> chex.Array:
+    """Compute the mean absolute GAE residual for each environment.
+
+    The absolute value is taken before averaging, so positive and negative
+    critic residuals cannot cancel. Unlike :func:`positive_value_loss`, this
+    metric averages every timestep in the rollout, including timesteps from an
+    incomplete final episode.
+
+    Args:
+        advantages: Generalized advantage estimates with shape
+            ``(time, environments)``.
+
+    Returns:
+        Mean absolute advantages with shape ``(environments,)``.
+    """
+    return jnp.abs(advantages).mean(axis=0)
+
+
 def max_mc_utility(inputs: RolloutMetricInputs) -> chex.Array:
     """Adapt :func:`max_mc` to the common rollout metric contract.
 
@@ -244,6 +300,38 @@ def positive_value_loss_utility(inputs: RolloutMetricInputs) -> chex.Array:
     return positive_value_loss(inputs.dones, inputs.advantages)
 
 
+def mean_positive_delight_utility(inputs: RolloutMetricInputs) -> chex.Array:
+    """Adapt :func:`mean_positive_delight` to the rollout metric contract.
+
+    Args:
+        inputs: Rollout signals produced by a PLR training step.
+
+    Returns:
+        Mean positive-delight scores with one score per environment.
+    """
+    if inputs.log_probs is None:
+        raise ValueError(
+            "mean_positive_delight requires collection-time action log-probabilities"
+        )
+    return mean_positive_delight(
+        inputs.dones,
+        inputs.advantages,
+        inputs.log_probs,
+    )
+
+
+def mean_absolute_advantage_utility(inputs: RolloutMetricInputs) -> chex.Array:
+    """Adapt :func:`mean_absolute_advantage` to the rollout metric contract.
+
+    Args:
+        inputs: Rollout signals produced by a PLR training step.
+
+    Returns:
+        Mean absolute advantages with one score per environment.
+    """
+    return mean_absolute_advantage(inputs.advantages)
+
+
 def create_rollout_metric_registry() -> MetricRegistry[RolloutMetricInputs]:
     """Create a registry containing JaxUED's built-in rollout metrics.
 
@@ -251,11 +339,14 @@ def create_rollout_metric_registry() -> MetricRegistry[RolloutMetricInputs]:
     without mutating process-wide state.
 
     Returns:
-        A registry containing the original ``"MaxMC"`` and ``"pvl"`` metrics.
+        A registry containing ``"MaxMC"``, ``"pvl"``,
+        ``"mean_positive_delight"``, and ``"mean_absolute_advantage"``.
     """
     registry = MetricRegistry[RolloutMetricInputs]()
     registry.register("MaxMC", max_mc_utility)
     registry.register("pvl", positive_value_loss_utility)
+    registry.register("mean_positive_delight", mean_positive_delight_utility)
+    registry.register("mean_absolute_advantage", mean_absolute_advantage_utility)
     return registry
 
 
@@ -266,6 +357,7 @@ def compute_rollout_utility(
     values: chex.Array,
     max_returns: chex.Array,
     advantages: chex.Array,
+    log_probs: Optional[chex.Array] = None,
 ) -> chex.Array:
     """Evaluate a selected utility metric from rollout tensors.
 
@@ -275,6 +367,9 @@ def compute_rollout_utility(
         values: Critic predictions with shape ``(time, environments)``.
         max_returns: Best completed-episode return for each environment.
         advantages: Advantage estimates with shape ``(time, environments)``.
+        log_probs: Optional collection-time action log-probabilities with shape
+            ``(time, environments)``. Required by metrics that use action
+            surprisal; omitted legacy metrics retain their previous behavior.
 
     Returns:
         Utility scores with one score per environment.
@@ -285,5 +380,6 @@ def compute_rollout_utility(
             values=values,
             max_returns=max_returns,
             advantages=advantages,
+            log_probs=log_probs,
         )
     )

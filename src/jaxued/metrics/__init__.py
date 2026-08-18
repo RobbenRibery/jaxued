@@ -17,6 +17,8 @@ from jaxued.metrics.rollout import (
     compute_rollout_utility,
     create_rollout_metric_registry,
     max_mc,
+    mean_absolute_advantage,
+    mean_positive_delight,
     positive_value_loss,
 )
 
@@ -36,5 +38,7 @@ __all__ = [
     "compute_rollout_utility",
     "create_rollout_metric_registry",
     "max_mc",
+    "mean_absolute_advantage",
+    "mean_positive_delight",
     "positive_value_loss",
 ]

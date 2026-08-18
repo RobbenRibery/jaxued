@@ -5,16 +5,39 @@ sampling. A metric is a pure callable that accepts a typed input record and
 returns one score per environment. A registry selects that callable once during
 configuration, before the training step is transformed by JAX.
 
-The built-in rollout pipeline provides two metrics with unchanged behavior:
+The built-in rollout pipeline provides four metrics:
 
 - `MaxMC`, which scores the gap between the maximum observed return and the
   critic value;
-- `pvl`, which scores positive value loss.
+- `pvl`, which scores positive value loss;
+- `mean_positive_delight`, which averages positive GAE multiplied by the
+  sampled action's collection-time surprisal over completed episodes;
+- `mean_absolute_advantage`, which averages the magnitude of the GAE residual
+  over rollout timesteps independently for each environment.
 
-Both consume `RolloutMetricInputs`. The Maze, Gymnax, and Craftax PLR examples
-resolve the configured metric from `create_rollout_metric_registry()` and call
-it through `compute_rollout_utility()`. Metric selection is therefore outside
-the rollout and level-sampler implementations.
+All four consume `RolloutMetricInputs`. The Maze, Gymnax, and Craftax PLR
+examples resolve the configured metric from `create_rollout_metric_registry()`
+and call it through `compute_rollout_utility()`. Metric selection is therefore
+outside the rollout and level-sampler implementations.
+
+Select mean absolute advantage from any registry-backed PLR command line with:
+
+```console
+--score_function mean_absolute_advantage
+```
+
+Select mean positive delight with:
+
+```console
+--score_function mean_positive_delight
+```
+
+For each completed episode, `mean_positive_delight` averages
+`max(advantage * -log_prob, 0)` across timesteps, then averages those episode
+scores. For a discrete policy this is surprisal-weighted positive value loss.
+The log-probability is the value recorded when the rollout action was sampled.
+For continuous policies, `-log_prob` is a differential surprisal and can be
+negative, so the same formula does not reduce to surprisal-weighted PVL.
 
 ## Adding a compatible rollout metric
 
@@ -27,13 +50,13 @@ import jax.numpy as jnp
 from jaxued.metrics import RolloutMetricInputs, create_rollout_metric_registry
 
 
-def mean_absolute_advantage(inputs: RolloutMetricInputs):
-    return jnp.abs(inputs.advantages).mean(axis=0)
+def mean_squared_advantage(inputs: RolloutMetricInputs):
+    return jnp.square(inputs.advantages).mean(axis=0)
 
 
 registry = create_rollout_metric_registry()
-registry.register("mean_absolute_advantage", mean_absolute_advantage)
-metric = registry.resolve("mean_absolute_advantage")
+registry.register("mean_squared_advantage", mean_squared_advantage)
+metric = registry.resolve("mean_squared_advantage")
 ```
 
 The PLR example `main` functions accept this registry through their
@@ -43,15 +66,16 @@ training loop:
 ```python
 from examples.maze_plr import main
 
-config["score_function"] = "mean_absolute_advantage"
+config["score_function"] = "mean_squared_advantage"
 main(config, metric_registry=registry)
 ```
 
 Metrics requiring a different evidence source define a separate typed input
 record rather than being forced into the rollout-only contract. The visited-
 state ensemble scorer uses `EnsembleDisagreementInputs`: visit-averaged action
-probabilities before and after a virtual update, plus a frozen pre-update
-visitor mask.
+probabilities before and after virtual learning, plus one frozen visitor mask.
+The multi-phase Maze runner builds that mask from the union of all phase
+visits; single-phase callers retain their original behavior.
 
 `aggregate_state_action_probabilities()` gives every policy one vote per
 physical state by averaging that policy's repeat visits first.

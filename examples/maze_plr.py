@@ -21,13 +21,17 @@ from jaxued.level_sampler import LevelSampler
 from jaxued.metrics import (
     MetricRegistry,
     RolloutMetricInputs,
-    compute_max_returns,
+    compute_max_mean_returns_epcount,
     compute_rollout_utility,
     create_rollout_metric_registry,
 )
 from jaxued.wrappers import AutoReplayWrapper
 import chex
 from enum import IntEnum
+
+
+DEFAULT_EVAL_FREQ = 200
+
 
 class UpdateState(IntEnum):
     DR = 0
@@ -395,8 +399,41 @@ def train_state_to_log_dict(train_state: TrainState, level_sampler: LevelSampler
 
 def _agent_log_metrics(losses):
     """Aggregate PPO Agent metrics across one logging interval."""
-    _, (_, _, entropy) = losses
-    return {"agent/entropy": entropy.mean()}
+    loss, (value_loss, policy_loss, entropy) = losses
+    return {
+        "agent/loss": loss.mean(),
+        "agent/value_loss": value_loss.mean(),
+        "agent/policy_loss": policy_loss.mean(),
+        "agent/entropy": entropy.mean(),
+    }
+
+
+def _rollout_return_stats(dones, rewards):
+    """Summarize completed training episodes without counting partial tails."""
+    mean_returns, max_returns, episode_counts = compute_max_mean_returns_epcount(
+        dones,
+        rewards,
+    )
+    return (
+        max_returns,
+        (mean_returns * episode_counts).sum(),
+        episode_counts.sum(),
+    )
+
+
+def _training_return_log_metrics(return_sums, episode_counts):
+    """Aggregate completed-episode returns across one logging interval."""
+    total_return = return_sums.sum()
+    total_episodes = episode_counts.sum()
+    mean_return = jnp.where(
+        total_episodes > 0,
+        total_return / jnp.maximum(total_episodes, 1),
+        jnp.nan,
+    )
+    return {
+        "return/train": mean_return,
+        "return/train_episode_count": total_episodes,
+    }
 
 
 def main(
@@ -446,6 +483,10 @@ def main(
             "num_env_steps": env_steps,
             "sps": env_steps / stats['time_delta'],
             **_agent_log_metrics(stats["losses"]),
+            **_training_return_log_metrics(
+                stats["training_return_sum"],
+                stats["training_episode_count"],
+            ),
         }
         
         # evaluation performance
@@ -567,13 +608,18 @@ def main(
                 config["num_steps"],
             )
             advantages, targets = compute_gae(config["gamma"], config["gae_lambda"], last_value, values, rewards, dones)
-            max_returns = compute_max_returns(dones, rewards)
+            (
+                max_returns,
+                training_return_sum,
+                training_episode_count,
+            ) = _rollout_return_stats(dones, rewards)
             scores = compute_rollout_utility(
                 utility_metric,
                 dones=dones,
                 values=values,
                 max_returns=max_returns,
                 advantages=advantages,
+                log_probs=log_probs,
             )
             sampler, _ = level_sampler.insert_batch(sampler, new_levels, scores, {"max_return": max_returns})
             
@@ -596,6 +642,8 @@ def main(
             metrics = {
                 "losses": jax.tree_util.tree_map(lambda x: x.mean(), losses),
                 "mean_num_blocks": new_levels.wall_map.sum() / config["num_train_envs"],
+                "training_return_sum": training_return_sum,
+                "training_episode_count": training_episode_count,
             }
             
             train_state = train_state.replace(
@@ -631,13 +679,22 @@ def main(
                 config["num_steps"],
             )
             advantages, targets = compute_gae(config["gamma"], config["gae_lambda"], last_value, values, rewards, dones)
-            max_returns = jnp.maximum(level_sampler.get_levels_extra(sampler, level_inds)["max_return"], compute_max_returns(dones, rewards))
+            (
+                rollout_max_returns,
+                training_return_sum,
+                training_episode_count,
+            ) = _rollout_return_stats(dones, rewards)
+            max_returns = jnp.maximum(
+                level_sampler.get_levels_extra(sampler, level_inds)["max_return"],
+                rollout_max_returns,
+            )
             scores = compute_rollout_utility(
                 utility_metric,
                 dones=dones,
                 values=values,
                 max_returns=max_returns,
                 advantages=advantages,
+                log_probs=log_probs,
             )
             sampler = level_sampler.update_batch(sampler, level_inds, scores, {"max_return": max_returns})
             
@@ -660,6 +717,8 @@ def main(
             metrics = {
                 "losses": jax.tree_util.tree_map(lambda x: x.mean(), losses),
                 "mean_num_blocks": levels.wall_map.sum() / config["num_train_envs"],
+                "training_return_sum": training_return_sum,
+                "training_episode_count": training_episode_count,
             }
             
             train_state = train_state.replace(
@@ -699,13 +758,18 @@ def main(
                 config["num_steps"],
             )
             advantages, targets = compute_gae(config["gamma"], config["gae_lambda"], last_value, values, rewards, dones)
-            max_returns = compute_max_returns(dones, rewards)
+            (
+                max_returns,
+                training_return_sum,
+                training_episode_count,
+            ) = _rollout_return_stats(dones, rewards)
             scores = compute_rollout_utility(
                 utility_metric,
                 dones=dones,
                 values=values,
                 max_returns=max_returns,
                 advantages=advantages,
+                log_probs=log_probs,
             )
             sampler, _ = level_sampler.insert_batch(sampler, child_levels, scores, {"max_return": max_returns})
             
@@ -728,6 +792,8 @@ def main(
             metrics = {
                 "losses": jax.tree_util.tree_map(lambda x: x.mean(), losses),
                 "mean_num_blocks": child_levels.wall_map.sum() / config["num_train_envs"],
+                "training_return_sum": training_return_sum,
+                "training_episode_count": training_episode_count,
             }
             
             train_state = train_state.replace(
@@ -885,7 +951,7 @@ if __name__=="__main__":
     parser.add_argument("--checkpoint_save_interval", type=int, default=2)
     parser.add_argument("--max_number_of_checkpoints", type=int, default=60)
     # === EVAL ===
-    parser.add_argument("--eval_freq", type=int, default=250)
+    parser.add_argument("--eval_freq", type=int, default=DEFAULT_EVAL_FREQ)
     parser.add_argument("--eval_num_attempts", type=int, default=10)
     parser.add_argument("--eval_levels", nargs='+', default=[
         "SixteenRooms",

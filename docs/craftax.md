@@ -63,7 +63,7 @@ Name  | Description | Default
 `--use_accel`                   | Should we use ACCEL                                                                                                                         | False
 `--num_edits`                   | How many ACCEL edits should we make                                                                                                                         | 30
 `--accel_mutation`              | What mutation to use, `swap`, `swap_restricted` or `noise`                                                                                                                         | "swap"
-`--score_function`              | The score function to use, `pvl` or `MaxMC`                                                                                                | MaxMC
+`--score_function`              | The score function to use: `MaxMC`, `pvl`, `mean_positive_delight`, or `mean_absolute_advantage`                                                  | MaxMC
 `--exploratory_grad_updates`    | If `True`, trains on random levels                                                                                                         | False
 `--level_buffer_capacity`       | The maximum number of levels in the buffer.                                                                                                | 4000
 `--replay_prob`                 | The probability of performing a `replay` step                                                                                              | 0.8

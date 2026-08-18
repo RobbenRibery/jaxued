@@ -39,8 +39,9 @@ class EnsembleDisagreementInputs(NamedTuple):
             with shape ``(levels, policies, states, actions)``.
         after_action_probabilities: Visit-averaged post-update distributions
             with the same shape and state alignment as the pre-update values.
-        visited: Frozen pre-update visitor mask with shape
-            ``(levels, policies, states)``. A state is eligible only when at
+        visited: Frozen visitor mask with shape
+            ``(levels, policies, states)``. It may represent one rollout or a
+            union of several probe phases. A state is eligible only when at
             least two policies visited it.
     """
 
@@ -116,10 +117,14 @@ def aggregate_state_action_probabilities(
     )
 
     def _aggregate_trajectory(ids, probabilities):
-        probability_sum = jnp.zeros(
-            (num_states, action_count),
-            dtype=probabilities.dtype,
-        ).at[ids].add(probabilities)
+        probability_sum = (
+            jnp.zeros(
+                (num_states, action_count),
+                dtype=probabilities.dtype,
+            )
+            .at[ids]
+            .add(probabilities)
+        )
         visit_count = jnp.zeros((num_states,), dtype=jnp.int32).at[ids].add(1)
         mean_probabilities = probability_sum / jnp.maximum(visit_count[:, None], 1)
         return mean_probabilities, visit_count
@@ -171,9 +176,9 @@ def compute_ensemble_disagreement_reduction(
     safe_eligible_state_count = jnp.maximum(eligible_state_count, 1)
 
     def _state_uncertainty(action_probabilities):
-        mean_distribution = (
-            action_probabilities * visitor_mask[..., None]
-        ).sum(axis=1) / safe_visitor_count[..., None]
+        mean_distribution = (action_probabilities * visitor_mask[..., None]).sum(
+            axis=1
+        ) / safe_visitor_count[..., None]
         mean_member_entropy = (
             categorical_entropy(action_probabilities) * visitor_mask
         ).sum(axis=1) / safe_visitor_count
@@ -181,12 +186,12 @@ def compute_ensemble_disagreement_reduction(
 
     uncertainty_before = _state_uncertainty(inputs.before_action_probabilities)
     uncertainty_after = _state_uncertainty(inputs.after_action_probabilities)
-    mean_uncertainty_before = (
-        uncertainty_before * eligible
-    ).sum(axis=-1) / safe_eligible_state_count
-    mean_uncertainty_after = (
-        uncertainty_after * eligible
-    ).sum(axis=-1) / safe_eligible_state_count
+    mean_uncertainty_before = (uncertainty_before * eligible).sum(
+        axis=-1
+    ) / safe_eligible_state_count
+    mean_uncertainty_after = (uncertainty_after * eligible).sum(
+        axis=-1
+    ) / safe_eligible_state_count
     scores = mean_uncertainty_before - mean_uncertainty_after
 
     return EnsembleDisagreementResult(

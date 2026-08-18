@@ -69,6 +69,91 @@ To run them, simply run the scripts directly. See the [documentation](https://dr
 python examples/maze_plr.py
 ```
 
+#### Modal launcher
+
+The launchers in `modal-run/maze/` run on one L40S by default, log to W&B in
+online mode, and persist checkpoints in the `jaxued-checkpoints` Modal Volume.
+They share image, secret, volume, and typed training configuration in
+`modal-run/maze/_common.py`.
+
+```bash
+uv pip install -e ".[modal]"
+modal setup
+modal secret create wandb-secret --from-dotenv .env
+modal run modal-run/maze/robust_plr.py
+modal run modal-run/maze/robust_plr_three_seeds.py
+modal run modal-run/maze/mean_absolute_advantage_three_seeds.py
+modal run modal-run/maze/mean_positive_delight_three_seeds.py
+modal run modal-run/maze/plr_plus.py
+modal run modal-run/maze/ensemble_epistemic_uncertainty.py
+```
+
+Arguments can be overridden through the local entrypoint, for example:
+
+```bash
+modal run modal-run/maze/robust_plr.py --seed 1 --run-name maze_robust_plr_seed_1
+```
+
+The three-seed launcher runs seeds `0,1,2` concurrently in one W&B group and
+stores checkpoints under separate seed directories. Override the exact seeds
+or use a short smoke-test budget with:
+
+```bash
+modal run modal-run/maze/robust_plr_three_seeds.py \
+  --seeds 3,5,8 \
+  --num-updates 100
+```
+
+Run the same three-seed Robust PLR configuration with mean absolute advantage
+as its replay score using:
+
+```bash
+modal run modal-run/maze/mean_absolute_advantage_three_seeds.py \
+  --run-name maze_mean_absolute_advantage_three_seeds \
+  --seeds 0,1,2 \
+  --num-updates 30000
+```
+
+Run the matching three-seed configuration with mean positive delight as its
+replay score using:
+
+```bash
+modal run modal-run/maze/mean_positive_delight_three_seeds.py \
+  --run-name maze_mean_positive_delight_three_seeds \
+  --seeds 0,1,2 \
+  --num-updates 30000
+```
+
+`plr_plus.py` selects the existing PLR mode with exploratory gradient updates.
+The ensemble launcher defaults to 8 agents, 3 isolated virtual rollout-PPO
+phases, 5 virtual PPO epochs per phase, a virtual level batch size of 32 on
+L40S, and a checkpoint interval of 2,500 training updates. Both
+single-agent launchers evaluate every 200 updates and checkpoint every 10
+evaluation cycles, which is 2,000 training updates.
+
+```bash
+modal run modal-run/maze/ensemble_epistemic_uncertainty.py \
+  --virtual-rollout-phases 3 \
+  --virtual-epoch-ppo 5 \
+  --virtual-level-batch-size 32
+```
+
+To sweep virtual level batch sizes `1, 2, 4, 8, 16, 32` on both supported
+benchmark GPUs:
+
+```bash
+modal run modal-run/maze/benchmark_ensemble_epistemic.py --gpu both
+```
+
+The sweep reports compilation time, median and p95 steady-state latency,
+scoring updates per second, peak VRAM, and updates per dollar. Apply its
+fastest non-OOM values in `VIRTUAL_LEVEL_BATCH_SIZE_BY_GPU`. The L40S default
+uses all 32 candidate levels; the RTX PRO 6000 default remains 4 until its
+sweep is recorded.
+
+Set `JAXUED_MODAL_GPU` before invoking `modal run` to select another supported
+GPU type.
+
 ### Evaluation
 After the training is completed, it will store checkpoints in `./checkpoints/<run_name>/<seed>/models/<update_step>`, and the same file can be run to evaluate these checkpoints, storing the evaluation results in `./results/`.
 The only things to change are `--mode=eval`, specifying `--checkpoint_directory` and `--checkpoint_to_eval`:

@@ -2,10 +2,16 @@ This example implements several variations of curation-based UED methods. In par
 
 See the DR example for details about what this outputs, and how to run it.
 
+Training logs include `return/train`, the episode-count-weighted mean return
+over completed training episodes since the previous logging point, and
+`return/train_episode_count`, its denominator. Incomplete rollout tails are
+excluded; if no episode completes, `return/train` is `NaN` and the count is
+zero.
+
 ## Arguments
 Name  | Description | Default
 -------------                   | ------------- | -------------
-`--score_function`              | The score function to use, `pvl` or `MaxMC`                                                                                                | MaxMC
+`--score_function`              | The score function to use: `MaxMC`, `pvl`, `mean_positive_delight`, or `mean_absolute_advantage`                                                  | MaxMC
 `--exploratory_grad_updates`    | If `True`, trains on random levels                                                                                                         | False
 `--level_buffer_capacity`       | The maximum number of levels in the buffer.                                                                                                | 4000
 `--replay_prob`                 | The probability of performing a `replay` step                                                                                              | 0.8
@@ -43,4 +49,3 @@ Name  | Description | Default
 `--critic_coeff`                | Critic coefficient                                                                                                                         | 0.5
 `--agent_view_size`             | The number of tiles the agent can see in front of it                                                                                       | 5
 `--n_walls`                     | Number of walls to generate                                                                                                                | 25
-

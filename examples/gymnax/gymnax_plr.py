@@ -726,6 +726,7 @@ def main(
                 values=values,
                 max_returns=max_returns,
                 advantages=advantages,
+                log_probs=log_probs,
             )
             sampler, _ = level_sampler.insert_batch(sampler, new_levels, scores, {"max_return": max_returns})
             
@@ -789,6 +790,7 @@ def main(
                 values=values,
                 max_returns=max_returns,
                 advantages=advantages,
+                log_probs=log_probs,
             )
             sampler = level_sampler.update_batch(sampler, level_inds, scores, {"max_return": max_returns})
             
@@ -856,6 +858,7 @@ def main(
                 values=values,
                 max_returns=max_returns,
                 advantages=advantages,
+                log_probs=log_probs,
             )
             sampler, _ = level_sampler.insert_batch(sampler, child_levels, scores, {"max_return": max_returns})
             
