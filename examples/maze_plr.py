@@ -1,7 +1,7 @@
 import json
 import time
 import re
-from typing import Sequence, Tuple
+from typing import Callable, Sequence, Tuple
 import numpy as np
 import jax
 import jax.numpy as jnp
@@ -39,12 +39,18 @@ from jaxued.wrappers import AutoReplayWrapper
 import chex
 from enum import IntEnum
 from typing import Optional, Dict, Any
+
 try:
     from examples.policy_grad_utils import compute_raw_pg_grad_norms
     from examples.value_loss_utils import ppo_value_loss
 except ModuleNotFoundError:
     from policy_grad_utils import compute_raw_pg_grad_norms
     from value_loss_utils import ppo_value_loss
+
+
+DEFAULT_EVAL_FREQ = 200
+DEFAULT_EXPLORATORY_GRAD_UPDATES = False
+DEFAULT_USE_ACCEL = False
 
 
 class UpdateState(IntEnum):
@@ -62,6 +68,18 @@ class TrainState(BaseTrainState):
     dr_last_level_batch: chex.ArrayTree = struct.field(pytree_node=True)
     replay_last_level_batch: chex.ArrayTree = struct.field(pytree_node=True)
     mutation_last_level_batch: chex.ArrayTree = struct.field(pytree_node=True)
+
+
+@struct.dataclass
+class TransferEvaluationBatch:
+    """Fixed initial conditions and random stream for paired target evaluation."""
+
+    init_hstate: chex.ArrayTree = struct.field(pytree_node=True)
+    init_obs: Observation = struct.field(pytree_node=True)
+    init_env_state: EnvState = struct.field(pytree_node=True)
+    rollout_rng: chex.PRNGKey = struct.field(pytree_node=True)
+    source_count: int = struct.field(pytree_node=False)
+    target_count: int = struct.field(pytree_node=False)
 
 
 # region PPO helper functions
@@ -302,6 +320,315 @@ def evaluate_rnn(
     return states, rewards, episode_lengths
 
 
+def _level_match_mask(levels: Level, level: Level) -> chex.Array:
+    """Return exact pytree equality for one level against a level batch."""
+    equality_tree = jax.tree_util.tree_map(
+        lambda batch_leaf, leaf: (batch_leaf == leaf)
+        .reshape(batch_leaf.shape[0], -1)
+        .all(axis=-1),
+        levels,
+        level,
+    )
+    equality_leaves = jax.tree_util.tree_leaves(equality_tree)
+    return jnp.stack(equality_leaves, axis=0).all(axis=0)
+
+
+def generate_transfer_target_bank(
+    rng: chex.PRNGKey,
+    source_level: Level,
+    mutate_level: Callable[[chex.PRNGKey, Level, int], Level],
+    target_count: int,
+    num_edits: int,
+) -> Level:
+    """Generate fixed editor-chain targets for one source level.
+
+    Each target is one independent Minimax editor chain. The mutator supplied by
+    the transfer scorer is configured with ``allow_no_op=False`` and
+    ``max_num_edits=num_edits``, so every chain applies exactly ``num_edits``
+    sampled editor operations. Targets are intentionally not deduplicated.
+
+    Args:
+        rng: Key used to sample independent editor chains.
+        source_level: Level whose local transfer neighborhood is generated.
+        mutate_level: Configured Minimax mutation function.
+        target_count: Number of editor chains in the target bank.
+        num_edits: Number of editor applications in each chain.
+
+    Returns:
+        Batched target levels with leading shape ``(target_count, ...)``.
+    """
+    return jax.vmap(mutate_level, in_axes=(0, None, None))(
+        jax.random.split(rng, target_count),
+        source_level,
+        num_edits,
+    )
+
+
+def resolve_transfer_target_banks(
+    rng: chex.PRNGKey,
+    sampler: core.FrozenDict[str, chex.ArrayTree],
+    source_levels: Level,
+    mutate_level: Callable[[chex.PRNGKey, Level, int], Level],
+    target_count: int,
+    num_edits: int,
+) -> Tuple[chex.PRNGKey, Level]:
+    """Resolve one fixed target bank for every new source candidate.
+
+    Stored PLR duplicates reuse the stored target bank. Later duplicates within
+    the current candidate batch reuse the first resolved bank. Only a source
+    with neither kind of match runs the editor-chain generator.
+
+    Args:
+        rng: Target-generation key.
+        sampler: Current PLR sampler containing target-bank level extras.
+        source_levels: New candidate source batch with leading shape ``(N, ...)``.
+        mutate_level: Transfer-specific Minimax mutation function.
+        target_count: Number of targets attached to each source.
+        num_edits: Editor applications in every chain.
+
+    Returns:
+        Updated key and target banks with leading shape ``(N, target_count, ...)``.
+    """
+    source_count = jax.tree_util.tree_leaves(source_levels)[0].shape[0]
+    stored_target_banks = sampler["levels_extra"]["transfer_targets"]
+    placeholder_bank = jax.tree_util.tree_map(lambda leaf: leaf[0], stored_target_banks)
+    resolved_banks = jax.tree_util.tree_map(
+        lambda leaf: jnp.repeat(leaf[None, ...], source_count, axis=0),
+        placeholder_bank,
+    )
+    source_indices = jnp.arange(source_count)
+    stored_indices = jnp.arange(sampler["scores"].shape[0])
+
+    def resolve_one(carry, source_index):
+        rng_carry, banks = carry
+        rng_carry, rng_generate = jax.random.split(rng_carry)
+        source = jax.tree_util.tree_map(lambda leaf: leaf[source_index], source_levels)
+
+        stored_matches = (
+            _level_match_mask(sampler["levels"], source)
+            & (stored_indices < sampler["size"])
+            & sampler["levels_extra"]["has_transfer_targets"]
+        )
+        has_stored_match = stored_matches.any()
+        stored_index = stored_matches.argmax()
+
+        earlier_matches = _level_match_mask(source_levels, source) & (
+            source_indices < source_index
+        )
+        has_earlier_match = earlier_matches.any()
+        earlier_index = earlier_matches.argmax()
+
+        def use_stored_bank(_):
+            return jax.tree_util.tree_map(
+                lambda leaf: leaf[stored_index], stored_target_banks
+            )
+
+        def use_earlier_or_generate(_):
+            return jax.lax.cond(
+                has_earlier_match,
+                lambda __: jax.tree_util.tree_map(
+                    lambda leaf: leaf[earlier_index], banks
+                ),
+                lambda __: generate_transfer_target_bank(
+                    rng=rng_generate,
+                    source_level=source,
+                    mutate_level=mutate_level,
+                    target_count=target_count,
+                    num_edits=num_edits,
+                ),
+                operand=None,
+            )
+
+        target_bank = jax.lax.cond(
+            has_stored_match,
+            use_stored_bank,
+            use_earlier_or_generate,
+            operand=None,
+        )
+        banks = jax.tree_util.tree_map(
+            lambda all_banks, bank: all_banks.at[source_index].set(bank),
+            banks,
+            target_bank,
+        )
+        return (rng_carry, banks), None
+
+    (rng, resolved_banks), _ = jax.lax.scan(
+        resolve_one,
+        (rng, resolved_banks),
+        source_indices,
+    )
+    return rng, resolved_banks
+
+
+def evaluate_returns_rnn(
+    rng: chex.PRNGKey,
+    env: UnderspecifiedEnv,
+    env_params: EnvParams,
+    train_state: TrainState,
+    init_hstate: chex.ArrayTree,
+    init_obs: Observation,
+    init_env_state: EnvState,
+    max_episode_length: int,
+) -> chex.Array:
+    """Evaluate one masked episode return per level without storing trajectories."""
+    num_levels = jax.tree_util.tree_leaves(init_obs)[0].shape[0]
+
+    def step(carry, _):
+        rng_carry, hstate, obs, state, done, active, returns = carry
+        rng_carry, rng_action, rng_step = jax.random.split(rng_carry, 3)
+
+        network_input = jax.tree_util.tree_map(
+            lambda leaf: leaf[None, ...], (obs, done)
+        )
+        hstate, policy, _ = train_state.apply_fn(
+            train_state.params, network_input, hstate
+        )
+        action = policy.sample(seed=rng_action).squeeze(0)
+        obs, state, reward, done, _ = jax.vmap(env.step, in_axes=(0, 0, 0, None))(
+            jax.random.split(rng_step, num_levels),
+            state,
+            action,
+            env_params,
+        )
+        returns = returns + reward * active
+        active = active & ~done
+        return (rng_carry, hstate, obs, state, done, active, returns), None
+
+    initial_carry = (
+        rng,
+        init_hstate,
+        init_obs,
+        init_env_state,
+        jnp.zeros(num_levels, dtype=jnp.bool_),
+        jnp.ones(num_levels, dtype=jnp.bool_),
+        jnp.zeros(num_levels, dtype=jnp.float32),
+    )
+    (_, _, _, _, _, _, returns), _ = jax.lax.scan(
+        step,
+        initial_carry,
+        None,
+        length=max_episode_length,
+    )
+    return returns
+
+
+def prepare_editor_transfer_evaluation(
+    rng: chex.PRNGKey,
+    env: UnderspecifiedEnv,
+    env_params: EnvParams,
+    target_banks: Level,
+) -> Tuple[chex.PRNGKey, TransferEvaluationBatch]:
+    """Create shared reset states and randomness for paired target evaluation."""
+    bank_leaf = jax.tree_util.tree_leaves(target_banks)[0]
+    source_count, target_count = bank_leaf.shape[:2]
+    flat_target_count = source_count * target_count
+    flat_targets = jax.tree_util.tree_map(
+        lambda leaf: leaf.reshape(flat_target_count, *leaf.shape[2:]), target_banks
+    )
+
+    rng, rng_reset, rng_evaluate = jax.random.split(rng, 3)
+    init_obs, init_env_state = jax.vmap(env.reset_to_level, in_axes=(0, 0, None))(
+        jax.random.split(rng_reset, flat_target_count),
+        flat_targets,
+        env_params,
+    )
+    return rng, TransferEvaluationBatch(
+        init_hstate=ActorCritic.initialize_carry((flat_target_count,)),
+        init_obs=init_obs,
+        init_env_state=init_env_state,
+        rollout_rng=rng_evaluate,
+        source_count=source_count,
+        target_count=target_count,
+    )
+
+
+def evaluate_editor_transfer_returns(
+    env: UnderspecifiedEnv,
+    env_params: EnvParams,
+    policy: TrainState,
+    evaluation_batch: TransferEvaluationBatch,
+    max_episode_length: int,
+) -> chex.Array:
+    """Evaluate paired target returns for one policy state."""
+    flat_returns = evaluate_returns_rnn(
+        rng=evaluation_batch.rollout_rng,
+        env=env,
+        env_params=env_params,
+        train_state=policy,
+        init_hstate=evaluation_batch.init_hstate,
+        init_obs=evaluation_batch.init_obs,
+        init_env_state=evaluation_batch.init_env_state,
+        max_episode_length=max_episode_length,
+    )
+    return flat_returns.reshape(
+        evaluation_batch.source_count, evaluation_batch.target_count
+    )
+
+
+def compute_editor_transfer_scores(
+    returns_before: chex.Array,
+    returns_after: chex.Array,
+) -> Tuple[chex.Array, Dict[str, chex.Array]]:
+    """Compute per-source mean gains and aggregate diagnostics."""
+    target_count = returns_before.shape[1]
+
+    gains = returns_after - returns_before
+    scores = gains.mean(axis=1)
+    std_ddof = 1 if target_count > 1 else 0
+    standard_errors = gains.std(axis=1, ddof=std_ddof) / jnp.sqrt(target_count)
+    diagnostics = {
+        "transfer_pre_return_mean": returns_before.mean(),
+        "transfer_post_return_mean": returns_after.mean(),
+        "transfer_gain_mean": gains.mean(),
+        "transfer_gain_std": gains.std(),
+        "transfer_standard_error_mean": standard_errors.mean(),
+        "transfer_positive_gain_fraction": (gains > 0).mean(),
+    }
+    return scores, diagnostics
+
+
+def aggregate_replay_transfer_updates(
+    level_indices: chex.Array,
+    scores: chex.Array,
+    max_returns: chex.Array,
+) -> Tuple[chex.Array, chex.Array]:
+    """Give repeated replay indices identical mean-score/max-return updates."""
+    same_index = level_indices[:, None] == level_indices[None, :]
+    counts = same_index.sum(axis=1)
+    aggregate_scores = (same_index * scores[None, :]).sum(axis=1) / counts
+    aggregate_max_returns = jnp.where(same_index, max_returns[None, :], -jnp.inf).max(
+        axis=1
+    )
+    return aggregate_scores, aggregate_max_returns
+
+
+def select_editor_transfer_states(
+    original_state: TrainState,
+    updated_state: TrainState,
+    persist_update: bool,
+) -> Tuple[TrainState, TrainState]:
+    """Select continuing and scoring states after one full-batch PPO update."""
+    if persist_update:
+        return updated_state, updated_state
+    return original_state, updated_state
+
+
+def empty_editor_transfer_metrics() -> Dict[str, chex.Array]:
+    """Return a stable metric pytree for branches without transfer scoring."""
+    return {
+        "transfer_pre_return_mean": jnp.array(jnp.nan, dtype=jnp.float32),
+        "transfer_post_return_mean": jnp.array(jnp.nan, dtype=jnp.float32),
+        "transfer_gain_mean": jnp.array(jnp.nan, dtype=jnp.float32),
+        "transfer_gain_std": jnp.array(jnp.nan, dtype=jnp.float32),
+        "transfer_standard_error_mean": jnp.array(jnp.nan, dtype=jnp.float32),
+        "transfer_positive_gain_fraction": jnp.array(jnp.nan, dtype=jnp.float32),
+        "transfer_attached_bank_count": jnp.array(0, dtype=jnp.int32),
+        "transfer_eval_env_steps": jnp.array(0, dtype=jnp.int32),
+        "transfer_virtual_optimizer_steps": jnp.array(0, dtype=jnp.int32),
+        "transfer_update_is_virtual": jnp.array(0.0, dtype=jnp.float32),
+    }
+
+
 def update_actor_critic_rnn(
     rng: chex.PRNGKey,
     train_state: TrainState,
@@ -376,14 +703,14 @@ def update_actor_critic_rnn(
     per_step_grad_norms = None
     if compute_per_step_grads:
         per_step_grad_norms = compute_raw_pg_grad_norms(
-            apply_fn = train_state.apply_fn,
-            params = train_state.params,
-            obs = obs,
-            last_dones = last_dones,
-            actions = actions,
-            advantages = advantages,
-            init_hstate = init_hstate,
-            pg_n_minibatch = config["pg_n_minibatch"],
+            apply_fn=train_state.apply_fn,
+            params=train_state.params,
+            obs=obs,
+            last_dones=last_dones,
+            actions=actions,
+            advantages=advantages,
+            init_hstate=init_hstate,
+            pg_n_minibatch=config["pg_n_minibatch"],
         )
 
     def update_epoch(carry, _):
@@ -577,21 +904,38 @@ def train_state_to_log_dict(
     sampler = train_state.sampler
     idx = jnp.arange(level_sampler.capacity) < sampler["size"]
     s = jnp.maximum(idx.sum(), 1)
+    log = {
+        "level_sampler/size": sampler["size"],
+        "level_sampler/episode_count": sampler["episode_count"],
+        "level_sampler/max_score": sampler["scores"].max(),
+        "level_sampler/weighted_score": (
+            sampler["scores"] * level_sampler.level_weights(sampler)
+        ).sum(),
+        "level_sampler/mean_score": (sampler["scores"] * idx).sum() / s,
+    }
+    if "levels_extra" in sampler and "has_transfer_targets" in sampler["levels_extra"]:
+        log["level_sampler/transfer_target_bank_count"] = (
+            sampler["levels_extra"]["has_transfer_targets"] & idx
+        ).sum()
+
     return {
-        "log": {
-            "level_sampler/size": sampler["size"],
-            "level_sampler/episode_count": sampler["episode_count"],
-            "level_sampler/max_score": sampler["scores"].max(),
-            "level_sampler/weighted_score": (
-                sampler["scores"] * level_sampler.level_weights(sampler)
-            ).sum(),
-            "level_sampler/mean_score": (sampler["scores"] * idx).sum() / s,
-        },
+        "log": log,
         "info": {
             "num_dr_updates": train_state.num_dr_updates,
             "num_replay_updates": train_state.num_replay_updates,
             "num_mutation_updates": train_state.num_mutation_updates,
         },
+    }
+
+
+def _agent_log_metrics(losses: chex.ArrayTree) -> dict[str, chex.Array]:
+    """Average PPO agent metrics across one W&B logging interval."""
+    loss, (value_loss, policy_loss, entropy) = losses
+    return {
+        "agent/loss": loss.mean(),
+        "agent/value_loss": value_loss.mean(),
+        "agent/policy_loss": policy_loss.mean(),
+        "agent/entropy": entropy.mean(),
     }
 
 
@@ -759,10 +1103,13 @@ def ppo_loss_fn_for_s_in(
     values_pred_clipped = values + (values_pred - values).clip(
         -config["clip_eps"], config["clip_eps"]
     )
-    l_vf = 0.5 * jnp.maximum(
-        (values_pred - targets) ** 2,
-        (values_pred_clipped - targets) ** 2,
-    ).mean()
+    l_vf = (
+        0.5
+        * jnp.maximum(
+            (values_pred - targets) ** 2,
+            (values_pred_clipped - targets) ** 2,
+        ).mean()
+    )
     entropy = pi.entropy().mean()
 
     return l_clip + config["critic_coeff"] * l_vf - config["entropy_coeff"] * entropy
@@ -873,7 +1220,15 @@ def collect_s_in_rollout_set(
     init_hstate_flat = ActorCritic.initialize_carry((num_rollout_envs,))
     (
         (rng, _train_state, _, _, _, last_value_flat),
-        (obs_flat, actions_flat, rewards_flat, dones_flat, log_probs_flat, values_flat, _),
+        (
+            obs_flat,
+            actions_flat,
+            rewards_flat,
+            dones_flat,
+            log_probs_flat,
+            values_flat,
+            _,
+        ),
     ) = sample_trajectories_rnn(
         rng=rng,
         env=env,
@@ -1150,11 +1505,15 @@ def compute_s_in_scores(
         scores = scores.reshape(num_padded_levels)[:num_envs]
         loss_before = loss_before.reshape(num_padded_levels)[:num_envs]
         loss_after = loss_after.reshape(num_padded_levels)[:num_envs]
-    return rng, scores, {
-        "lp_s_in_mean": scores.mean(),
-        "lp_loss_before_mean": loss_before.mean(),
-        "lp_loss_after_mean": loss_after.mean(),
-    }
+    return (
+        rng,
+        scores,
+        {
+            "lp_s_in_mean": scores.mean(),
+            "lp_loss_before_mean": loss_before.mean(),
+            "lp_loss_after_mean": loss_after.mean(),
+        },
+    )
 
 
 def normalize_run_name(name: str) -> str:
@@ -1164,7 +1523,22 @@ def normalize_run_name(name: str) -> str:
     return normalized or "run"
 
 
+def validate_editor_transfer_config(config: Dict[str, Any]) -> None:
+    """Validate the static shape and ownership constraints of editor transfer."""
+    if config["score_function"] != "editor_transfer":
+        return
+    if config["transfer_target_count"] < 1:
+        raise ValueError("--transfer_target_count must be >= 1.")
+    if config["transfer_num_edits"] < 1:
+        raise ValueError("--transfer_num_edits must be >= 1.")
+    if config["use_accel"]:
+        raise ValueError(
+            "--score_function editor_transfer does not support --use_accel."
+        )
+
+
 def main(config=None, project="JAXUED_TEST"):
+    validate_editor_transfer_config(config)
     tags = []
     if not config["exploratory_grad_updates"]:
         tags.append("robust")
@@ -1188,18 +1562,30 @@ def main(config=None, project="JAXUED_TEST"):
     wandb.define_metric("agent/*", step_metric="num_updates")
     wandb.define_metric("return/*", step_metric="num_updates")
     wandb.define_metric("eval_ep_lengths/*", step_metric="num_updates")
+    wandb.define_metric("transfer/*", step_metric="num_updates")
 
     def log_eval(stats, train_state_info):
         print(f"Logging update: {stats['update_count']}")
 
         # generic stats
-        env_steps = (
+        source_env_steps = (
             stats["update_count"] * config["num_train_envs"] * config["num_steps"]
         )
+        transfer_env_steps = 0
+        if config["score_function"] == "editor_transfer":
+            transfer_env_steps = (
+                stats["update_count"]
+                * 2
+                * config["num_train_envs"]
+                * config["transfer_target_count"]
+                * env_params.max_steps_in_episode
+            )
+        env_steps = source_env_steps + transfer_env_steps
         log_dict = {
             "num_updates": stats["update_count"],
             "num_env_steps": env_steps,
             "sps": env_steps / stats["time_delta"],
+            **_agent_log_metrics(stats["losses"]),
         }
 
         # evaluation performance
@@ -1234,6 +1620,45 @@ def main(config=None, project="JAXUED_TEST"):
                         "lp/loss_after_mean": lp_loss_after_mean,
                     }
                 )
+
+        if config["score_function"] == "editor_transfer":
+            transfer_keys = {
+                "transfer/pre_return_mean": "transfer_pre_return_mean",
+                "transfer/post_return_mean": "transfer_post_return_mean",
+                "transfer/gain_mean": "transfer_gain_mean",
+                "transfer/gain_std": "transfer_gain_std",
+                "transfer/standard_error_mean": "transfer_standard_error_mean",
+                "transfer/positive_gain_fraction": ("transfer_positive_gain_fraction"),
+                "transfer/attached_bank_count_per_update": (
+                    "transfer_attached_bank_count"
+                ),
+                "transfer/update_is_virtual_fraction": ("transfer_update_is_virtual"),
+            }
+            log_dict.update(
+                {
+                    log_name: stats[metric_name].mean()
+                    for log_name, metric_name in transfer_keys.items()
+                }
+            )
+            log_dict.update(
+                {
+                    "transfer/target_count": config["transfer_target_count"],
+                    "transfer/chain_length": config["transfer_num_edits"],
+                    "transfer/eval_env_steps_interval": stats[
+                        "transfer_eval_env_steps"
+                    ].sum(),
+                    "transfer/eval_env_steps_total": transfer_env_steps,
+                    "transfer/virtual_optimizer_steps_interval": stats[
+                        "transfer_virtual_optimizer_steps"
+                    ].sum(),
+                    "transfer/virtual_optimizer_steps_total": (
+                        train_state_info["info"]["num_dr_updates"]
+                        * config["num_minibatches"]
+                        * config["epoch_ppo"]
+                        * (not config["exploratory_grad_updates"])
+                    ),
+                }
+            )
 
         # images
         log_dict.update(
@@ -1290,6 +1715,9 @@ def main(config=None, project="JAXUED_TEST"):
     env = AutoReplayWrapper(env)
     env_params = env.default_params
     mutate_level = make_level_mutator_minimax(100)
+    mutate_transfer_target = make_level_mutator_minimax(
+        config["transfer_num_edits"], allow_no_op=False
+    )
 
     # And the level sampler
     level_sampler = LevelSampler(
@@ -1336,7 +1764,23 @@ def main(config=None, project="JAXUED_TEST"):
             # optax.adam(learning_rate=config["lr"], eps=1e-5),
         )
         pholder_level = sample_random_level(jax.random.PRNGKey(0))
-        sampler = level_sampler.initialize(pholder_level, {"max_return": -jnp.inf})
+        level_extras = {"max_return": -jnp.inf}
+        if config["score_function"] == "editor_transfer":
+            placeholder_target_bank = jax.tree_util.tree_map(
+                lambda leaf: jnp.repeat(
+                    jnp.asarray(leaf)[None, ...],
+                    config["transfer_target_count"],
+                    axis=0,
+                ),
+                pholder_level,
+            )
+            level_extras.update(
+                {
+                    "transfer_targets": placeholder_target_bank,
+                    "has_transfer_targets": jnp.array(False),
+                }
+            )
+        sampler = level_sampler.initialize(pholder_level, level_extras)
         pholder_level_batch = jax.tree_util.tree_map(
             lambda x: jnp.array([x]).repeat(config["num_train_envs"], axis=0),
             pholder_level,
@@ -1394,11 +1838,37 @@ def main(config=None, project="JAXUED_TEST"):
             """
             sampler = train_state.sampler
 
-            # Reset
+            transfer_metrics = empty_editor_transfer_metrics()
+
+            # Generate source levels, then resolve their fixed target banks before
+            # either target evaluation or the source rollout.
             rng, rng_levels, rng_reset = jax.random.split(rng, 3)
             new_levels = jax.vmap(sample_random_level)(
                 jax.random.split(rng_levels, config["num_train_envs"])
             )
+            if config["score_function"] == "editor_transfer":
+                rng, target_banks = resolve_transfer_target_banks(
+                    rng=rng,
+                    sampler=sampler,
+                    source_levels=new_levels,
+                    mutate_level=mutate_transfer_target,
+                    target_count=config["transfer_target_count"],
+                    num_edits=config["transfer_num_edits"],
+                )
+                rng, transfer_evaluation = prepare_editor_transfer_evaluation(
+                    rng=rng,
+                    env=eval_env,
+                    env_params=env_params,
+                    target_banks=target_banks,
+                )
+                returns_before = evaluate_editor_transfer_returns(
+                    env=eval_env,
+                    env_params=env_params,
+                    policy=train_state,
+                    evaluation_batch=transfer_evaluation,
+                    max_episode_length=env_params.max_steps_in_episode,
+                )
+
             init_obs, init_env_state = jax.vmap(
                 env.reset_to_level, in_axes=(0, 0, None)
             )(
@@ -1412,23 +1882,23 @@ def main(config=None, project="JAXUED_TEST"):
                 (rng, train_state, _, _, _, last_value),
                 (obs, actions, rewards, dones, log_probs, values, _),
             ) = sample_trajectories_rnn(
-                rng = rng,
-                env = env,
-                env_params = env_params,
-                train_state = train_state,
-                init_hstate = init_hstate_a,
-                init_obs = init_obs,
-                init_env_state = init_env_state,
-                num_envs = config["num_train_envs"],
-                max_episode_length = config["num_steps"],
+                rng=rng,
+                env=env,
+                env_params=env_params,
+                train_state=train_state,
+                init_hstate=init_hstate_a,
+                init_obs=init_obs,
+                init_env_state=init_env_state,
+                num_envs=config["num_train_envs"],
+                max_episode_length=config["num_steps"],
             )
             advantages, targets = compute_gae(
-                gamma = config["gamma"],
-                lambd = config["gae_lambda"],
-                last_value = last_value,
-                values = values,
-                rewards = rewards,
-                dones = dones,          
+                gamma=config["gamma"],
+                lambd=config["gae_lambda"],
+                last_value=last_value,
+                values=values,
+                rewards=rewards,
+                dones=dones,
             )
             max_returns = compute_max_returns(dones=dones, rewards=rewards)
 
@@ -1465,8 +1935,15 @@ def main(config=None, project="JAXUED_TEST"):
             else:
                 compute_grads = config["score_function"] == "abs_pg"
 
-            # Update (real PPO update on rollout A)
-            (rng, train_state), (losses, grad_norms) = update_actor_critic_rnn(
+            # Editor transfer always materializes the one full-batch PPO update.
+            # Robust mode keeps it only as the post-update scoring state.
+            policy_before_update = train_state
+            apply_update = (
+                True
+                if config["score_function"] == "editor_transfer"
+                else config["exploratory_grad_updates"]
+            )
+            (rng, updated_train_state), (losses, grad_norms) = update_actor_critic_rnn(
                 rng=rng,
                 train_state=train_state,
                 init_hstate=init_hstate_a,
@@ -1478,11 +1955,53 @@ def main(config=None, project="JAXUED_TEST"):
                 clip_eps=config["clip_eps"],
                 entropy_coeff=config["entropy_coeff"],
                 critic_coeff=config["critic_coeff"],
-                update_grad=config["exploratory_grad_updates"],
+                update_grad=apply_update,
                 compute_per_step_grads=compute_grads,
             )
 
-            if config["score_function"] != "s_in":
+            if config["score_function"] == "editor_transfer":
+                train_state, scoring_state = select_editor_transfer_states(
+                    original_state=policy_before_update,
+                    updated_state=updated_train_state,
+                    persist_update=config["exploratory_grad_updates"],
+                )
+                returns_after = evaluate_editor_transfer_returns(
+                    env=eval_env,
+                    env_params=env_params,
+                    policy=scoring_state,
+                    evaluation_batch=transfer_evaluation,
+                    max_episode_length=env_params.max_steps_in_episode,
+                )
+                scores, transfer_diagnostics = compute_editor_transfer_scores(
+                    returns_before=returns_before,
+                    returns_after=returns_after,
+                )
+                transfer_metrics = {
+                    **transfer_diagnostics,
+                    "transfer_attached_bank_count": jnp.array(
+                        config["num_train_envs"], dtype=jnp.int32
+                    ),
+                    "transfer_eval_env_steps": jnp.array(
+                        2
+                        * config["num_train_envs"]
+                        * config["transfer_target_count"]
+                        * env_params.max_steps_in_episode,
+                        dtype=jnp.int32,
+                    ),
+                    "transfer_virtual_optimizer_steps": jnp.array(
+                        config["num_minibatches"] * config["epoch_ppo"]
+                        if not config["exploratory_grad_updates"]
+                        else 0,
+                        dtype=jnp.int32,
+                    ),
+                    "transfer_update_is_virtual": jnp.array(
+                        not config["exploratory_grad_updates"], dtype=jnp.float32
+                    ),
+                }
+            else:
+                train_state = updated_train_state
+
+            if config["score_function"] not in ("s_in", "editor_transfer"):
                 # Existing score functions are computed after the PPO update path.
                 scores = compute_score(
                     config,
@@ -1493,17 +2012,28 @@ def main(config=None, project="JAXUED_TEST"):
                     targets=targets,
                     grad_norms=grad_norms,
                 )
+            level_extras = {"max_return": max_returns}
+            if config["score_function"] == "editor_transfer":
+                level_extras.update(
+                    {
+                        "transfer_targets": target_banks,
+                        "has_transfer_targets": jnp.ones(
+                            config["num_train_envs"], dtype=jnp.bool_
+                        ),
+                    }
+                )
             sampler, _ = level_sampler.insert_batch(
                 sampler=sampler,
                 levels=new_levels,
                 scores=scores,
-                level_extras={"max_return": max_returns},
+                level_extras=level_extras,
             )
 
             metrics = {
                 "losses": jax.tree_util.tree_map(lambda x: x.mean(), losses),
                 "mean_num_blocks": new_levels.wall_map.sum() / config["num_train_envs"],
                 **lp_metrics,
+                **transfer_metrics,
             }
 
             train_state = train_state.replace(
@@ -1535,6 +2065,24 @@ def main(config=None, project="JAXUED_TEST"):
             sampler, (level_inds, levels) = level_sampler.sample_replay_levels(
                 sampler, rng_levels, config["num_train_envs"]
             )
+            stored_level_extras = level_sampler.get_levels_extra(sampler, level_inds)
+            transfer_metrics = empty_editor_transfer_metrics()
+            if config["score_function"] == "editor_transfer":
+                target_banks = stored_level_extras["transfer_targets"]
+                rng, transfer_evaluation = prepare_editor_transfer_evaluation(
+                    rng=rng,
+                    env=eval_env,
+                    env_params=env_params,
+                    target_banks=target_banks,
+                )
+                returns_before = evaluate_editor_transfer_returns(
+                    env=eval_env,
+                    env_params=env_params,
+                    policy=train_state,
+                    evaluation_batch=transfer_evaluation,
+                    max_episode_length=env_params.max_steps_in_episode,
+                )
+
             init_obs, init_env_state = jax.vmap(
                 env.reset_to_level, in_axes=(0, 0, None)
             )(jax.random.split(rng_reset, config["num_train_envs"]), levels, env_params)
@@ -1562,7 +2110,7 @@ def main(config=None, project="JAXUED_TEST"):
                 dones,
             )
             max_returns = jnp.maximum(
-                level_sampler.get_levels_extra(sampler, level_inds)["max_return"],
+                stored_level_extras["max_return"],
                 compute_max_returns(dones, rewards),
             )
 
@@ -1616,7 +2164,39 @@ def main(config=None, project="JAXUED_TEST"):
                 compute_per_step_grads=compute_grads,
             )
 
-            if config["score_function"] != "s_in":
+            if config["score_function"] == "editor_transfer":
+                returns_after = evaluate_editor_transfer_returns(
+                    env=eval_env,
+                    env_params=env_params,
+                    policy=train_state,
+                    evaluation_batch=transfer_evaluation,
+                    max_episode_length=env_params.max_steps_in_episode,
+                )
+                scores, transfer_diagnostics = compute_editor_transfer_scores(
+                    returns_before=returns_before,
+                    returns_after=returns_after,
+                )
+                scores, max_returns = aggregate_replay_transfer_updates(
+                    level_indices=level_inds,
+                    scores=scores,
+                    max_returns=max_returns,
+                )
+                transfer_metrics = {
+                    **transfer_diagnostics,
+                    "transfer_attached_bank_count": jnp.array(
+                        config["num_train_envs"], dtype=jnp.int32
+                    ),
+                    "transfer_eval_env_steps": jnp.array(
+                        2
+                        * config["num_train_envs"]
+                        * config["transfer_target_count"]
+                        * env_params.max_steps_in_episode,
+                        dtype=jnp.int32,
+                    ),
+                    "transfer_virtual_optimizer_steps": jnp.array(0, dtype=jnp.int32),
+                    "transfer_update_is_virtual": jnp.array(0.0, dtype=jnp.float32),
+                }
+            elif config["score_function"] != "s_in":
                 # Existing score functions are computed after the PPO update path.
                 scores = compute_score(
                     config=config,
@@ -1627,17 +2207,28 @@ def main(config=None, project="JAXUED_TEST"):
                     targets=targets,
                     grad_norms=grad_norms,
                 )
+            level_extras = {"max_return": max_returns}
+            if config["score_function"] == "editor_transfer":
+                level_extras.update(
+                    {
+                        "transfer_targets": target_banks,
+                        "has_transfer_targets": jnp.ones(
+                            config["num_train_envs"], dtype=jnp.bool_
+                        ),
+                    }
+                )
             sampler = level_sampler.update_batch(
                 sampler=sampler,
                 level_inds=level_inds,
                 scores=scores,
-                level_extras={"max_return": max_returns},
+                level_extras=level_extras,
             )
 
             metrics = {
                 "losses": jax.tree_util.tree_map(lambda x: x.mean(), losses),
                 "mean_num_blocks": levels.wall_map.sum() / config["num_train_envs"],
                 **lp_metrics,
+                **transfer_metrics,
             }
 
             train_state = train_state.replace(
@@ -1664,6 +2255,7 @@ def main(config=None, project="JAXUED_TEST"):
                 losses leaves: (E, M)
             """
             sampler = train_state.sampler
+            transfer_metrics = empty_editor_transfer_metrics()
             rng, rng_mutate, rng_reset = jax.random.split(rng, 3)
 
             # mutate
@@ -1780,6 +2372,7 @@ def main(config=None, project="JAXUED_TEST"):
                 "mean_num_blocks": child_levels.wall_map.sum()
                 / config["num_train_envs"],
                 **lp_metrics,
+                **transfer_metrics,
             }
 
             train_state = train_state.replace(
@@ -1800,21 +2393,26 @@ def main(config=None, project="JAXUED_TEST"):
             branch = (1 - s) * level_sampler.sample_replay_decision(
                 train_state.sampler, rng_replay
             ) + 2 * s
+            return jax.lax.switch(
+                branch,
+                [
+                    on_new_levels,
+                    on_replay_levels,
+                    on_mutate_levels,
+                ],
+                rng,
+                train_state,
+            )
         else:
             branch = level_sampler.sample_replay_decision(
                 train_state.sampler, rng_replay
             ).astype(int)
-
-        return jax.lax.switch(
-            branch,
-            [
-                on_new_levels,
-                on_replay_levels,
-                on_mutate_levels,
-            ],
-            rng,
-            train_state,
-        )
+            return jax.lax.switch(
+                branch,
+                [on_new_levels, on_replay_levels],
+                rng,
+                train_state,
+            )
 
     def eval(rng: chex.PRNGKey, train_state: TrainState):
         """
@@ -1842,14 +2440,14 @@ def main(config=None, project="JAXUED_TEST"):
             jax.random.split(rng_reset, num_levels), levels, env_params
         )
         states, rewards, episode_lengths = evaluate_rnn(
-            rng = rng,
-            env = eval_env,
-            env_params = env_params,
-            train_state = train_state,
-            init_hstate = ActorCritic.initialize_carry((num_levels,)),
-            init_obs = init_obs,
-            init_env_state = init_env_state,
-            max_episode_length = env_params.max_steps_in_episode,
+            rng=rng,
+            env=eval_env,
+            env_params=env_params,
+            train_state=train_state,
+            init_hstate=ActorCritic.initialize_carry((num_levels,)),
+            init_obs=init_obs,
+            init_env_state=init_env_state,
+            max_episode_length=env_params.max_steps_in_episode,
         )
         mask = jnp.arange(env_params.max_steps_in_episode)[..., None] < episode_lengths
         cum_rewards = (rewards * mask).sum(axis=0)
@@ -2034,7 +2632,7 @@ if __name__ == "__main__":
     parser.add_argument("--checkpoint_save_interval", type=int, default=2)
     parser.add_argument("--max_number_of_checkpoints", type=int, default=60)
     # === EVAL ===
-    parser.add_argument("--eval_freq", type=int, default=250)
+    parser.add_argument("--eval_freq", type=int, default=DEFAULT_EVAL_FREQ)
     parser.add_argument("--eval_num_attempts", type=int, default=10)
     parser.add_argument(
         "--eval_levels",
@@ -2071,11 +2669,32 @@ if __name__ == "__main__":
         "--score_function",
         type=str,
         default="MaxMC",
-        choices=["MaxMC", "pvl", "abs_pg", "ppo_value_loss", "s_in"],
+        choices=[
+            "MaxMC",
+            "pvl",
+            "abs_pg",
+            "ppo_value_loss",
+            "s_in",
+            "editor_transfer",
+        ],
         help="Score function for level prioritization. "
-             "abs_pg uses policy gradient magnitudes. "
-             "ppo_value_loss uses PPO clipped value loss magnitude. "
-             "s_in uses holdout PPO total-loss reduction after virtual updates.",
+        "abs_pg uses policy gradient magnitudes. "
+        "ppo_value_loss uses PPO clipped value loss magnitude. "
+        "s_in uses holdout PPO total-loss reduction after virtual updates. "
+        "editor_transfer uses paired before/after returns on fixed edited "
+        "target banks.",
+    )
+    group.add_argument(
+        "--transfer_target_count",
+        type=int,
+        default=128,
+        help="Number of fixed editor-chain targets attached to each PLR source.",
+    )
+    group.add_argument(
+        "--transfer_num_edits",
+        type=int,
+        default=16,
+        help="Number of sequential editor applications in every target chain.",
     )
     group.add_argument(
         "--sin_n_virtual_updates",
@@ -2094,20 +2713,20 @@ if __name__ == "__main__":
         type=int,
         default=None,
         help="Number of independent Set A and Set B rollouts per sampled "
-             "training environment slot when computing s_in. Required for s_in.",
+        "training environment slot when computing s_in. Required for s_in.",
     )
     group.add_argument(
         "--sin_score_batch_size",
         type=int,
         default=1,
         help="Number of sampled training environment slots to score together "
-             "inside s_in. Use 1 for the safest TPU compile path; increase for "
-             "more throughput if compilation remains stable.",
+        "inside s_in. Use 1 for the safest TPU compile path; increase for "
+        "more throughput if compilation remains stable.",
     )
     group.add_argument(
         "--exploratory_grad_updates",
         action=argparse.BooleanOptionalAction,
-        default=False,
+        default=DEFAULT_EXPLORATORY_GRAD_UPDATES,
     )
     group.add_argument("--level_buffer_capacity", type=int, default=4000)
     group.add_argument("--replay_prob", type=float, default=0.8)
@@ -2126,11 +2745,13 @@ if __name__ == "__main__":
         type=int,
         default=1,
         help="Number of env minibatches for policy gradient norm estimation. "
-             "Higher values reduce memory at the cost of sequential processing.",
+        "Higher values reduce memory at the cost of sequential processing.",
     )
     # === ACCEL ===
     group.add_argument(
-        "--use_accel", action=argparse.BooleanOptionalAction, default=False
+        "--use_accel",
+        action=argparse.BooleanOptionalAction,
+        default=DEFAULT_USE_ACCEL,
     )
     group.add_argument("--num_edits", type=int, default=5)
     # === ENV CONFIG ===
@@ -2150,7 +2771,11 @@ if __name__ == "__main__":
         config["score_function"] == "s_in"
         and config["sin_num_rollouts_per_level"] is None
     ):
-        parser.error("--sin_num_rollouts_per_level is required for --score_function s_in.")
+        parser.error("--sin_num_rollouts_per_level is required for --score_function s_in.")  # fmt: skip
+    try:
+        validate_editor_transfer_config(config)
+    except ValueError as error:
+        parser.error(str(error))
     if config["num_env_steps"] is not None:
         config["num_updates"] = config["num_env_steps"] // (
             config["num_train_envs"] * config["num_steps"]

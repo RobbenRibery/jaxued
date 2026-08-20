@@ -217,7 +217,21 @@ def make_level_mutator(
 # Credit: minimax
 def make_level_mutator_minimax(
     max_num_edits: int,
+    allow_no_op: bool = True,
 ) -> Callable[[chex.PRNGKey, Level, int], Level]:
+    """Build the Minimax maze mutator.
+
+    Args:
+        max_num_edits: Static maximum number of mutation steps compiled into the
+            returned function.
+        allow_no_op: Whether ``NO_OP`` may be sampled as a mutation. The default
+            preserves the historical ACCEL mutation distribution. Transfer-target
+            generation disables it so every sampled editor is substantive.
+
+    Returns:
+        A function mapping ``(rng, level, num_edits)`` to a mutated level.
+    """
+
     class Mutations(IntEnum):
         # Turn left, turn right, move forward
         NO_OP = 0
@@ -293,7 +307,9 @@ def make_level_mutator_minimax(
             ), None
 
         rng, nrng, *mrngs = jax.random.split(rng, max_num_edits + 2)
-        mutations = jax.random.choice(nrng, np.arange(len(Mutations)), (max_num_edits,))
+        first_mutation = 0 if allow_no_op else 1
+        mutation_choices = np.arange(first_mutation, len(Mutations))
+        mutations = jax.random.choice(nrng, mutation_choices, (max_num_edits,))
         mutations = jnp.where(
             jnp.arange(max_num_edits) < n, mutations, -1
         )  # mask out extra mutations
