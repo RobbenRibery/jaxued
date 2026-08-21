@@ -12,10 +12,12 @@ LAUNCHER_DIRECTORY = Path(__file__).resolve().parents[1] / "modal-run" / "maze"
 sys.path.insert(0, str(LAUNCHER_DIRECTORY))
 
 from _common import (  # noqa: E402
+    DEFAULT_EDITOR_TRANSFER_GPU,
     EditorTransferRun,
     MazeRun,
     build_editor_transfer_command,
     build_robust_plr_command,
+    resolve_editor_transfer_gpu,
 )
 from editor_transfer_three_seeds import (  # noqa: E402
     DEFAULT_SEEDS,
@@ -51,6 +53,12 @@ def test_editor_transfer_command_defaults_to_robust_plr() -> None:
         "--checkpoint_save_interval",
         "10",
     )
+
+
+def test_editor_transfer_sweep_defaults_to_rtx_pro_6000() -> None:
+    assert DEFAULT_EDITOR_TRANSFER_GPU == "RTX-PRO-6000"
+    assert resolve_editor_transfer_gpu({}) == "RTX-PRO-6000"
+    assert resolve_editor_transfer_gpu({"JAXUED_MODAL_GPU": "H100"}) == "H100"
 
 
 def test_editor_transfer_matches_robust_plr_shared_modal_config() -> None:

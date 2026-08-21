@@ -1,6 +1,7 @@
 """Focused tests for fixed editor-target transfer scoring in Maze PLR."""
 
 import inspect
+from types import SimpleNamespace
 
 import jax
 import jax.numpy as jnp
@@ -11,16 +12,21 @@ from examples.maze_plr import (
     DEFAULT_EVAL_FREQ,
     DEFAULT_EXPLORATORY_GRAD_UPDATES,
     DEFAULT_USE_ACCEL,
+    EDITOR_TRANSFER_STAT_METRIC_KEYS,
     TrainState,
     _agent_log_metrics,
     _level_match_mask,
+    aggregate_editor_transfer_interval_metrics,
     aggregate_replay_transfer_updates,
     compute_gae,
     compute_editor_transfer_scores,
+    compute_plr_bank_score_diagnostics,
+    editor_transfer_interval_log_dict,
     generate_transfer_target_bank,
     resolve_transfer_target_banks,
     sample_trajectories_rnn,
     select_editor_transfer_states,
+    train_state_to_log_dict,
     update_actor_critic_rnn,
     validate_editor_transfer_config,
 )
@@ -200,6 +206,157 @@ def test_transfer_score_is_plain_mean_gain_with_diagnostic_se() -> None:
 
     assert jnp.allclose(scores, gains.mean(axis=1))
     assert jnp.allclose(diagnostics["transfer_standard_error_mean"], expected_se.mean())
+
+
+def test_transfer_score_distribution_metrics_match_linear_quantiles() -> None:
+    scores = jnp.arange(32, dtype=jnp.float32)
+    gains = jnp.stack((scores - 1, scores + 1), axis=1)
+    _, diagnostics = compute_editor_transfer_scores(jnp.zeros_like(gains), gains)
+
+    assert float(diagnostics["transfer_score_q10"]) == pytest.approx(3.1)
+    assert float(diagnostics["transfer_score_q50"]) == pytest.approx(15.5)
+    assert float(diagnostics["transfer_score_q90"]) == pytest.approx(27.9)
+    assert float(diagnostics["transfer_top_score_gap"]) == pytest.approx(1.0)
+
+
+def test_transfer_score_se_metrics_preserve_sign_and_strict_thresholds() -> None:
+    scores = jnp.array([-3.0, -1.0, 0.0, 1.5])
+    gains = jnp.stack((scores - 1, scores + 1), axis=1)
+    _, diagnostics = compute_editor_transfer_scores(jnp.zeros_like(gains), gains)
+
+    assert float(diagnostics["transfer_score_se_ratio_mean"]) == pytest.approx(-0.625)
+    assert float(diagnostics["transfer_score_se_abs_ratio_q50"]) == pytest.approx(1.25)
+    assert float(diagnostics["transfer_score_se_abs_ratio_q90"]) == pytest.approx(2.55)
+    assert float(
+        diagnostics["transfer_score_se_positive_gt_1_fraction"]
+    ) == pytest.approx(0.25)
+    assert float(
+        diagnostics["transfer_score_se_positive_gt_2_fraction"]
+    ) == pytest.approx(0.0)
+
+
+def test_zero_score_and_zero_se_produce_finite_zero_ratio() -> None:
+    returns = jnp.zeros((1, 1), dtype=jnp.float32)
+    _, diagnostics = compute_editor_transfer_scores(returns, returns)
+
+    assert float(diagnostics["transfer_score_se_ratio_mean"]) == 0.0
+    assert float(diagnostics["transfer_score_se_abs_ratio_q50"]) == 0.0
+    assert jnp.isfinite(diagnostics["transfer_score_se_ratio_mean"])
+
+
+def _transfer_interval_metrics(is_new: jnp.ndarray) -> dict[str, jnp.ndarray]:
+    metrics = {
+        metric_key: jnp.array([1.0, 3.0], dtype=jnp.float32)
+        for metric_key in EDITOR_TRANSFER_STAT_METRIC_KEYS
+    }
+    metrics.update(
+        {
+            "transfer_attached_bank_count": jnp.array([32, 32]),
+            "transfer_eval_env_steps": jnp.array([5, 7]),
+            "transfer_virtual_optimizer_steps": jnp.array([2, 0]),
+            "transfer_update_is_virtual": jnp.array([1.0, 0.0]),
+            "transfer_update_is_new": is_new,
+            "unrelated_metric": jnp.array([10.0, 20.0]),
+        }
+    )
+    return metrics
+
+
+def test_transfer_interval_metrics_split_new_and_replay_on_device() -> None:
+    aggregated = jax.jit(aggregate_editor_transfer_interval_metrics)(
+        _transfer_interval_metrics(jnp.array([1.0, 0.0]))
+    )
+
+    assert float(aggregated["transfer_score_q50"]) == pytest.approx(2.0)
+    assert float(aggregated["transfer_new_score_q50"]) == pytest.approx(1.0)
+    assert float(aggregated["transfer_replay_score_q50"]) == pytest.approx(3.0)
+    assert int(aggregated["transfer_new_update_count_interval"]) == 1
+    assert int(aggregated["transfer_replay_update_count_interval"]) == 1
+    assert float(aggregated["transfer_new_update_fraction"]) == pytest.approx(0.5)
+    assert float(aggregated["transfer_update_is_virtual"]) == pytest.approx(0.5)
+    assert int(aggregated["transfer_eval_env_steps"]) == 12
+    assert int(aggregated["transfer_virtual_optimizer_steps"]) == 2
+    assert jnp.array_equal(aggregated["unrelated_metric"], jnp.array([10.0, 20.0]))
+    assert "transfer_update_is_new" not in aggregated
+
+
+def test_transfer_interval_empty_branch_logs_zero_count_and_nan_statistics() -> None:
+    aggregated = aggregate_editor_transfer_interval_metrics(
+        _transfer_interval_metrics(jnp.ones(2))
+    )
+
+    assert int(aggregated["transfer_replay_update_count_interval"]) == 0
+    assert float(aggregated["transfer_replay_update_fraction"]) == 0.0
+    assert jnp.isnan(aggregated["transfer_replay_score_q50"])
+
+
+def test_plr_bank_score_metrics_ignore_unpopulated_slots() -> None:
+    diagnostics = compute_plr_bank_score_diagnostics(
+        scores=jnp.array([1.0, 3.0, -999.0, 100.0]),
+        size=jnp.array(2),
+    )
+
+    assert float(diagnostics["score_q10"]) == pytest.approx(1.2)
+    assert float(diagnostics["score_q50"]) == pytest.approx(2.0)
+    assert float(diagnostics["score_q90"]) == pytest.approx(2.8)
+    assert float(diagnostics["top_score_gap"]) == pytest.approx(2.0)
+
+
+def test_plr_bank_score_metrics_handle_empty_and_single_entry_banks() -> None:
+    scores = jnp.array([4.0, -jnp.inf, -jnp.inf])
+    empty = compute_plr_bank_score_diagnostics(scores, jnp.array(0))
+    single = compute_plr_bank_score_diagnostics(scores, jnp.array(1))
+
+    assert all(jnp.isnan(value) for value in empty.values())
+    assert float(single["score_q10"]) == 4.0
+    assert float(single["score_q50"]) == 4.0
+    assert float(single["score_q90"]) == 4.0
+    assert jnp.isnan(single["top_score_gap"])
+
+
+def test_level_sampler_log_dict_exposes_bank_score_diagnostics() -> None:
+    source = make_level_generator(5, 5, 3)(jax.random.PRNGKey(15))
+    sampler_api = LevelSampler(capacity=4)
+    sampler = sampler_api.initialize(source, {"max_return": -jnp.inf})
+    sampler, _ = sampler_api.insert(
+        sampler,
+        source,
+        score=jnp.array(4.0),
+        level_extra={"max_return": jnp.array(0.0)},
+    )
+    state = SimpleNamespace(
+        sampler=sampler,
+        num_dr_updates=1,
+        num_replay_updates=0,
+        num_mutation_updates=0,
+    )
+
+    log = train_state_to_log_dict(state, sampler_api)["log"]
+
+    assert float(log["level_sampler/score_q10"]) == 4.0
+    assert float(log["level_sampler/score_q50"]) == 4.0
+    assert float(log["level_sampler/score_q90"]) == 4.0
+    assert jnp.isnan(log["level_sampler/top_score_gap"])
+
+
+def test_editor_transfer_interval_log_dict_emits_all_diagnostic_keys() -> None:
+    stats = aggregate_editor_transfer_interval_metrics(
+        _transfer_interval_metrics(jnp.array([1.0, 0.0]))
+    )
+    log = editor_transfer_interval_log_dict(stats)
+
+    expected_suffixes = {
+        metric_key[len("transfer_") :]
+        for metric_key in EDITOR_TRANSFER_STAT_METRIC_KEYS
+    }
+    for metric_suffix in expected_suffixes:
+        assert f"transfer/{metric_suffix}" in log
+        assert f"transfer/new/{metric_suffix}" in log
+        assert f"transfer/replay/{metric_suffix}" in log
+    assert "transfer/new/update_count_interval" in log
+    assert "transfer/new/update_fraction" in log
+    assert "transfer/replay/update_count_interval" in log
+    assert "transfer/replay/update_fraction" in log
 
 
 def test_repeated_replay_indices_receive_order_independent_aggregates() -> None:

@@ -1,7 +1,8 @@
 """Launch editor-transfer Robust PLR for three seeds on Modal.
 
 The default interface matches the other Robust PLR metric sweeps: ACCEL and
-exploratory gradient updates are disabled. Run it with::
+exploratory gradient updates are disabled, and the GPU defaults to an NVIDIA
+RTX PRO 6000. Run it with::
 
     modal run modal-run/maze/editor_transfer_three_seeds.py
 

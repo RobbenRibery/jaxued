@@ -5,6 +5,7 @@ from __future__ import annotations
 import os
 import subprocess
 import sys
+from collections.abc import Mapping
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -15,7 +16,7 @@ REMOTE_REPOSITORY = Path("/root/jaxued")
 CHECKPOINT_DIRECTORY = REMOTE_REPOSITORY / "checkpoints"
 LOCAL_REPOSITORY = Path(__file__).resolve().parents[2]
 
-DEFAULT_GPU = os.environ.get("JAXUED_MODAL_GPU", "L40S")
+DEFAULT_EDITOR_TRANSFER_GPU = "RTX-PRO-6000"
 DEFAULT_TRANSFER_TARGET_COUNT = 128
 DEFAULT_TRANSFER_NUM_EDITS = 16
 WANDB_SECRET_NAME = os.environ.get("JAXUED_WANDB_SECRET", "wandb-secret")
@@ -23,6 +24,14 @@ CHECKPOINT_VOLUME_NAME = os.environ.get(
     "JAXUED_CHECKPOINT_VOLUME",
     "jaxued-checkpoints",
 )
+
+
+def resolve_editor_transfer_gpu(environ: Mapping[str, str]) -> str:
+    """Resolve the transfer sweep GPU while preserving the shared override."""
+    return environ.get("JAXUED_MODAL_GPU", DEFAULT_EDITOR_TRANSFER_GPU)
+
+
+DEFAULT_GPU = resolve_editor_transfer_gpu(os.environ)
 
 
 @dataclass(frozen=True)
