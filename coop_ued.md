@@ -27,6 +27,16 @@ The following W&B panels compare the six finished `editor_transfer` runs current
 
 The W&B comparison below shows mean solve rate for the finished MaxMC, editor-transfer, log-relative editor-transfer, mean-absolute-advantage, and mean-positive-delight runs. The methods improve at different rates and show substantial cross-run variation. Because the visible method groups contain different numbers of seeds and transfer scoring incurs additional evaluation work, this is a descriptive comparison by training update rather than a matched-compute performance ranking.
 
+| Method | Finished runs | W&B logged date | Terminal mean solve rate at 30K updates | Run range |
+|---|---:|---|---:|---:|
+| MaxMC | 3 | 4 Aug 2026 | 29.2% | 11.3–48.8% |
+| Editor transfer | 6 | 19–21 Aug 2026 | **29.8%** | 12.5–42.5% |
+| Log-relative editor transfer | 3 | 22 Aug 2026 | 27.1% | 17.5–32.5% |
+| Mean absolute advantage | 2 | 4 Aug 2026 | 26.3% | 23.8–28.8% |
+| Mean positive delight | 3 | 7 Aug 2026 | 16.7% | 10.0–21.3% |
+
+*Values are arithmetic means of each run's final W&B `solve_rate/mean` summary at 30,000 updates. Dates are the run start dates displayed by W&B; the range shows the minimum and maximum final solve rate within each method group.*
+
 ![W&B solve-rate comparison across UED scoring methods](figures/wandb-solve-rate-method-comparison.png)
 
 *Mean solve rate by scoring method over 30,000 training updates; shaded regions show the dispersion within each visible W&B method group.*
