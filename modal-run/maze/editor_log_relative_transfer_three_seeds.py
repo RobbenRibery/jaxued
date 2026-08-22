@@ -1,10 +1,12 @@
-"""Launch editor-transfer Robust PLR for three seeds on Modal.
+"""Launch log-relative editor-transfer Robust PLR for three seeds on Modal.
 
-The default interface matches the other Robust PLR metric sweeps: ACCEL and
-exploratory gradient updates are disabled, and the GPU defaults to an NVIDIA
-L40S. Run it with::
+The default interface is matched to ``editor_transfer_three_seeds.py``:
+ACCEL and exploratory gradient updates are disabled, the target bank contains
+128 levels, each target chain applies 16 edits, and the GPU defaults to an
+NVIDIA L40S. The only scoring difference is the smoothed log-relative
+gain selected by ``editor_log_relative_transfer``. Run it with::
 
-    modal run modal-run/maze/editor_transfer_three_seeds.py
+    modal run modal-run/maze/editor_log_relative_transfer_three_seeds.py
 
 Pass ``--exploratory-grad-updates`` only to select the PLR/PLR+ variant, which
 persists the source-level PPO update instead of discarding it after scoring.
@@ -18,10 +20,11 @@ from _common import (
     CHECKPOINT_DIRECTORY,
     CHECKPOINT_VOLUME_NAME,
     DEFAULT_GPU,
+    DEFAULT_TRANSFER_LOG_RELATIVE_TAU,
     DEFAULT_TRANSFER_NUM_EDITS,
     DEFAULT_TRANSFER_TARGET_COUNT,
-    EditorTransferRun,
-    build_editor_transfer_command,
+    EditorLogRelativeTransferRun,
+    build_editor_log_relative_transfer_command,
     checkpoint_volume,
     image,
     parse_three_seeds,
@@ -31,9 +34,12 @@ from _common import (
 
 
 DEFAULT_SEEDS = (0, 1, 2)
-SeedRequest = tuple[str, str, int, int, int, int, int, bool]
+SeedRequest = tuple[str, str, int, int, int, int, int, float, bool]
 
-app = modal.App("jaxued-maze-editor-transfer-three-seeds", image=image)
+app = modal.App(
+    "jaxued-maze-editor-log-relative-transfer-three-seeds",
+    image=image,
+)
 
 
 def parse_seeds(raw_seeds: str) -> tuple[int, int, int]:
@@ -47,8 +53,8 @@ def parse_seeds(raw_seeds: str) -> tuple[int, int, int]:
     secrets=[wandb_secret],
     volumes={str(CHECKPOINT_DIRECTORY): checkpoint_volume},
 )
-def run_editor_transfer_seed(request: SeedRequest) -> tuple[int, str]:
-    """Run one editor-transfer seed and return its checkpoint location."""
+def run_editor_log_relative_transfer_seed(request: SeedRequest) -> tuple[int, str]:
+    """Run one log-relative transfer seed and return its checkpoint location."""
     (
         run_name,
         project,
@@ -57,9 +63,10 @@ def run_editor_transfer_seed(request: SeedRequest) -> tuple[int, str]:
         checkpoint_save_interval,
         transfer_target_count,
         transfer_num_edits,
+        transfer_log_relative_tau,
         exploratory_grad_updates,
     ) = request
-    run = EditorTransferRun(
+    run = EditorLogRelativeTransferRun(
         run_name=run_name,
         project=project,
         seed=seed,
@@ -67,24 +74,29 @@ def run_editor_transfer_seed(request: SeedRequest) -> tuple[int, str]:
         checkpoint_save_interval=checkpoint_save_interval,
         transfer_target_count=transfer_target_count,
         transfer_num_edits=transfer_num_edits,
+        transfer_log_relative_tau=transfer_log_relative_tau,
         exploratory_grad_updates=exploratory_grad_updates,
     )
-    checkpoint_path = run_training(build_editor_transfer_command(run), run)
+    checkpoint_path = run_training(
+        build_editor_log_relative_transfer_command(run),
+        run,
+    )
     return seed, checkpoint_path
 
 
 @app.local_entrypoint()
 def main(
-    run_name: str = "maze_editor_transfer_three_seeds",
+    run_name: str = "maze_editor_log_relative_transfer_three_seeds",
     project: str = "JAXUED_TEST",
     seeds: str = "0,1,2",
     num_updates: int = 30_000,
     checkpoint_save_interval: int = 10,
     transfer_target_count: int = DEFAULT_TRANSFER_TARGET_COUNT,
     transfer_num_edits: int = DEFAULT_TRANSFER_NUM_EDITS,
+    transfer_log_relative_tau: float = DEFAULT_TRANSFER_LOG_RELATIVE_TAU,
     exploratory_grad_updates: bool = False,
 ) -> None:
-    """Run three seeds concurrently and wait for every result."""
+    """Run three matched log-relative transfer seeds concurrently."""
     seed_values = parse_seeds(seeds)
     requests = [
         (
@@ -95,11 +107,17 @@ def main(
             checkpoint_save_interval,
             transfer_target_count,
             transfer_num_edits,
+            transfer_log_relative_tau,
             exploratory_grad_updates,
         )
         for seed in seed_values
     ]
-    results = list(run_editor_transfer_seed.map(requests, return_exceptions=True))
+    results = list(
+        run_editor_log_relative_transfer_seed.map(
+            requests,
+            return_exceptions=True,
+        )
+    )
 
     failures = []
     for seed, result in zip(seed_values, results):
@@ -116,5 +134,6 @@ def main(
     if failures:
         failed_seeds = ", ".join(str(seed) for seed, _ in failures)
         raise RuntimeError(
-            f"Editor-transfer PLR failed for seed(s): {failed_seeds}"
+            "Log-relative editor-transfer PLR failed for seed(s): "
+            f"{failed_seeds}"
         )

@@ -13,8 +13,11 @@ sys.path.insert(0, str(LAUNCHER_DIRECTORY))
 
 from _common import (  # noqa: E402
     DEFAULT_EDITOR_TRANSFER_GPU,
+    DEFAULT_TRANSFER_LOG_RELATIVE_TAU,
+    EditorLogRelativeTransferRun,
     EditorTransferRun,
     MazeRun,
+    build_editor_log_relative_transfer_command,
     build_editor_transfer_command,
     build_robust_plr_command,
     resolve_editor_transfer_gpu,
@@ -22,6 +25,10 @@ from _common import (  # noqa: E402
 from editor_transfer_three_seeds import (  # noqa: E402
     DEFAULT_SEEDS,
     parse_seeds,
+)
+from editor_log_relative_transfer_three_seeds import (  # noqa: E402
+    DEFAULT_SEEDS as LOG_RELATIVE_DEFAULT_SEEDS,
+    parse_seeds as parse_log_relative_seeds,
 )
 
 
@@ -55,10 +62,17 @@ def test_editor_transfer_command_defaults_to_robust_plr() -> None:
     )
 
 
-def test_editor_transfer_sweep_defaults_to_rtx_pro_6000() -> None:
-    assert DEFAULT_EDITOR_TRANSFER_GPU == "RTX-PRO-6000"
-    assert resolve_editor_transfer_gpu({}) == "RTX-PRO-6000"
+def test_editor_transfer_sweeps_default_to_l40s() -> None:
+    assert DEFAULT_EDITOR_TRANSFER_GPU == "L40S"
+    assert resolve_editor_transfer_gpu({}) == "L40S"
     assert resolve_editor_transfer_gpu({"JAXUED_MODAL_GPU": "H100"}) == "H100"
+
+
+def test_log_relative_transfer_defaults_to_tau_point_one() -> None:
+    assert DEFAULT_TRANSFER_LOG_RELATIVE_TAU == pytest.approx(0.1)
+    assert EditorLogRelativeTransferRun(
+        run_name="log_relative"
+    ).transfer_log_relative_tau == pytest.approx(0.1)
 
 
 def test_editor_transfer_matches_robust_plr_shared_modal_config() -> None:
@@ -111,9 +125,56 @@ def test_editor_transfer_command_exposes_target_bank_shape() -> None:
     assert command[command.index("--transfer_num_edits") + 1] == "5"
 
 
+def test_log_relative_transfer_has_distinct_score_name_and_tau() -> None:
+    command = build_editor_log_relative_transfer_command(
+        EditorLogRelativeTransferRun(
+            run_name="log_relative",
+            transfer_log_relative_tau=0.25,
+        )
+    )
+
+    assert command[command.index("--score_function") + 1] == (
+        "editor_log_relative_transfer"
+    )
+    assert command[command.index("--transfer_log_relative_tau") + 1] == "0.25"
+
+
+def _command_without_option(command: tuple[str, ...], option: str) -> tuple[str, ...]:
+    option_index = command.index(option)
+    return command[:option_index] + command[option_index + 2 :]
+
+
+def test_log_relative_sweep_controls_match_absolute_transfer() -> None:
+    absolute = build_editor_transfer_command(
+        EditorTransferRun(run_name="matched", seed=2),
+        python_executable="python",
+    )
+    relative = build_editor_log_relative_transfer_command(
+        EditorLogRelativeTransferRun(run_name="matched", seed=2),
+        python_executable="python",
+    )
+
+    relative_without_tau = _command_without_option(
+        relative,
+        "--transfer_log_relative_tau",
+    )
+    absolute_score_index = absolute.index("--score_function") + 1
+    relative_score_index = relative_without_tau.index("--score_function") + 1
+
+    assert absolute_score_index == relative_score_index
+    assert absolute[:absolute_score_index] == (
+        relative_without_tau[:relative_score_index]
+    )
+    assert absolute[absolute_score_index + 1 :] == (
+        relative_without_tau[relative_score_index + 1 :]
+    )
+
+
 def test_editor_transfer_sweep_defaults_to_three_distinct_seeds() -> None:
     assert DEFAULT_SEEDS == (0, 1, 2)
     assert parse_seeds(",".join(map(str, DEFAULT_SEEDS))) == DEFAULT_SEEDS
+    assert LOG_RELATIVE_DEFAULT_SEEDS == DEFAULT_SEEDS
+    assert parse_log_relative_seeds("0,1,2") == DEFAULT_SEEDS
 
 
 @pytest.mark.parametrize(
@@ -135,8 +196,19 @@ def test_editor_transfer_sweep_rejects_invalid_seeds(
 
 @pytest.mark.parametrize(
     "field",
-    ("transfer_target_count", "transfer_num_edits"),
+    (
+        "transfer_target_count",
+        "transfer_num_edits",
+    ),
 )
 def test_editor_transfer_run_requires_positive_bank_controls(field: str) -> None:
     with pytest.raises(ValueError, match="must be positive"):
         EditorTransferRun(run_name="invalid", **{field: 0})
+
+
+def test_log_relative_transfer_run_requires_positive_tau() -> None:
+    with pytest.raises(ValueError, match="must be positive"):
+        EditorLogRelativeTransferRun(
+            run_name="invalid",
+            transfer_log_relative_tau=0,
+        )

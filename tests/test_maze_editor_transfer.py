@@ -11,7 +11,10 @@ from examples.maze_plr import (
     ActorCritic,
     DEFAULT_EVAL_FREQ,
     DEFAULT_EXPLORATORY_GRAD_UPDATES,
+    DEFAULT_TRANSFER_LOG_RELATIVE_TAU,
     DEFAULT_USE_ACCEL,
+    EDITOR_LOG_RELATIVE_TRANSFER_SCORE_FUNCTION,
+    EDITOR_TRANSFER_SCORE_FUNCTION,
     EDITOR_TRANSFER_STAT_METRIC_KEYS,
     TrainState,
     _agent_log_metrics,
@@ -19,7 +22,10 @@ from examples.maze_plr import (
     aggregate_editor_transfer_interval_metrics,
     aggregate_replay_transfer_updates,
     compute_gae,
+    compute_configured_editor_transfer_scores,
+    compute_editor_log_relative_transfer_scores,
     compute_editor_transfer_scores,
+    compute_log_relative_transfer_gains,
     compute_plr_bank_score_diagnostics,
     editor_transfer_interval_log_dict,
     generate_transfer_target_bank,
@@ -47,6 +53,7 @@ def test_editor_transfer_uses_modular_metrics_evaluation_cadence() -> None:
 def test_editor_transfer_defaults_to_robust_plr_protocol() -> None:
     assert DEFAULT_EXPLORATORY_GRAD_UPDATES is False
     assert DEFAULT_USE_ACCEL is False
+    assert DEFAULT_TRANSFER_LOG_RELATIVE_TAU == pytest.approx(0.1)
 
 
 def test_editor_transfer_logs_all_agent_metrics() -> None:
@@ -195,38 +202,106 @@ def test_resolver_reuses_stored_and_first_in_batch_target_banks() -> None:
     )
 
 
-def test_transfer_score_is_plain_mean_gain_with_diagnostic_se() -> None:
-    """PLR scores must not include a variance or standard-error penalty."""
+def test_editor_transfer_score_remains_mean_raw_gain_with_raw_se() -> None:
+    """The historical score name remains the absolute-delta control."""
     returns_before = jnp.array([[0.0, 1.0, 2.0, 3.0], [1.0, 1.0, 1.0, 1.0]])
     returns_after = jnp.array([[1.0, 3.0, 2.0, 2.0], [0.0, 1.0, 2.0, 3.0]])
 
     scores, diagnostics = compute_editor_transfer_scores(returns_before, returns_after)
-    gains = returns_after - returns_before
-    expected_se = gains.std(axis=1, ddof=1) / jnp.sqrt(4)
+    raw_gains = returns_after - returns_before
+    expected_se = raw_gains.std(axis=1, ddof=1) / jnp.sqrt(4)
 
-    assert jnp.allclose(scores, gains.mean(axis=1))
+    assert jnp.allclose(scores, raw_gains.mean(axis=1))
+    assert jnp.allclose(diagnostics["transfer_gain_mean"], raw_gains.mean())
     assert jnp.allclose(diagnostics["transfer_standard_error_mean"], expected_se.mean())
 
 
-def test_transfer_score_distribution_metrics_match_linear_quantiles() -> None:
-    scores = jnp.arange(32, dtype=jnp.float32)
-    gains = jnp.stack((scores - 1, scores + 1), axis=1)
-    _, diagnostics = compute_editor_transfer_scores(jnp.zeros_like(gains), gains)
+def test_log_relative_score_uses_transformed_gain_and_se() -> None:
+    returns_before = jnp.array([[0.0, 1.0, 2.0, 3.0], [1.0, 1.0, 1.0, 1.0]])
+    returns_after = jnp.array([[1.0, 3.0, 2.0, 2.0], [0.0, 1.0, 2.0, 3.0]])
 
-    assert float(diagnostics["transfer_score_q10"]) == pytest.approx(3.1)
-    assert float(diagnostics["transfer_score_q50"]) == pytest.approx(15.5)
-    assert float(diagnostics["transfer_score_q90"]) == pytest.approx(27.9)
-    assert float(diagnostics["transfer_top_score_gap"]) == pytest.approx(1.0)
+    scores, diagnostics = compute_editor_log_relative_transfer_scores(
+        returns_before,
+        returns_after,
+    )
+    log_relative_gains = compute_log_relative_transfer_gains(
+        returns_before, returns_after
+    )
+    expected_se = log_relative_gains.std(axis=1, ddof=1) / jnp.sqrt(4)
+
+    assert jnp.allclose(scores, log_relative_gains.mean(axis=1))
+    assert jnp.allclose(
+        diagnostics["transfer_log_relative_gain_mean"], log_relative_gains.mean()
+    )
+    assert jnp.allclose(diagnostics["transfer_standard_error_mean"], expected_se.mean())
+
+
+def test_log_relative_transfer_prioritizes_unlocking_from_zero() -> None:
+    returns_before = jnp.array([[0.0], [0.8]], dtype=jnp.float32)
+    returns_after = jnp.array([[0.1], [0.9]], dtype=jnp.float32)
+
+    scores, _ = compute_editor_log_relative_transfer_scores(
+        returns_before,
+        returns_after,
+        log_relative_tau=0.1,
+    )
+
+    assert float(scores[0]) == pytest.approx(float(jnp.log(2.0)))
+    assert float(scores[1]) == pytest.approx(float(jnp.log(1.0 / 0.9)))
+    assert float(scores[0]) > float(scores[1])
+
+
+def _returns_from_log_relative_gains(
+    log_relative_gains: jnp.ndarray,
+    *,
+    baseline: float = 0.5,
+    tau: float = 0.1,
+) -> tuple[jnp.ndarray, jnp.ndarray]:
+    returns_before = jnp.full_like(log_relative_gains, baseline)
+    returns_after = (returns_before + tau) * jnp.exp(log_relative_gains) - tau
+    return returns_before, returns_after
+
+
+def test_transfer_score_distribution_metrics_match_linear_quantiles() -> None:
+    scores = jnp.arange(32, dtype=jnp.float32) * 0.01
+    log_relative_gains = jnp.stack((scores - 0.01, scores + 0.01), axis=1)
+    returns_before, returns_after = _returns_from_log_relative_gains(
+        log_relative_gains
+    )
+    _, diagnostics = compute_editor_log_relative_transfer_scores(
+        returns_before,
+        returns_after,
+    )
+
+    assert float(diagnostics["transfer_score_q10"]) == pytest.approx(0.031)
+    assert float(diagnostics["transfer_score_q50"]) == pytest.approx(0.155)
+    assert float(diagnostics["transfer_score_q90"]) == pytest.approx(0.279)
+    assert float(diagnostics["transfer_top_score_gap"]) == pytest.approx(
+        0.01, abs=1e-6
+    )
 
 
 def test_transfer_score_se_metrics_preserve_sign_and_strict_thresholds() -> None:
-    scores = jnp.array([-3.0, -1.0, 0.0, 1.5])
-    gains = jnp.stack((scores - 1, scores + 1), axis=1)
-    _, diagnostics = compute_editor_transfer_scores(jnp.zeros_like(gains), gains)
+    score_se_ratios = jnp.array([-3.0, -1.0, 0.0, 1.5])
+    scores = score_se_ratios * 0.01
+    log_relative_gains = jnp.stack((scores - 0.01, scores + 0.01), axis=1)
+    returns_before, returns_after = _returns_from_log_relative_gains(
+        log_relative_gains
+    )
+    _, diagnostics = compute_editor_log_relative_transfer_scores(
+        returns_before,
+        returns_after,
+    )
 
-    assert float(diagnostics["transfer_score_se_ratio_mean"]) == pytest.approx(-0.625)
-    assert float(diagnostics["transfer_score_se_abs_ratio_q50"]) == pytest.approx(1.25)
-    assert float(diagnostics["transfer_score_se_abs_ratio_q90"]) == pytest.approx(2.55)
+    assert float(diagnostics["transfer_score_se_ratio_mean"]) == pytest.approx(
+        -0.625, abs=1e-5
+    )
+    assert float(diagnostics["transfer_score_se_abs_ratio_q50"]) == pytest.approx(
+        1.25, abs=1e-5
+    )
+    assert float(diagnostics["transfer_score_se_abs_ratio_q90"]) == pytest.approx(
+        2.55, abs=1e-5
+    )
     assert float(
         diagnostics["transfer_score_se_positive_gt_1_fraction"]
     ) == pytest.approx(0.25)
@@ -237,11 +312,30 @@ def test_transfer_score_se_metrics_preserve_sign_and_strict_thresholds() -> None
 
 def test_zero_score_and_zero_se_produce_finite_zero_ratio() -> None:
     returns = jnp.zeros((1, 1), dtype=jnp.float32)
-    _, diagnostics = compute_editor_transfer_scores(returns, returns)
+    _, diagnostics = compute_editor_log_relative_transfer_scores(returns, returns)
 
     assert float(diagnostics["transfer_score_se_ratio_mean"]) == 0.0
     assert float(diagnostics["transfer_score_se_abs_ratio_q50"]) == 0.0
     assert jnp.isfinite(diagnostics["transfer_score_se_ratio_mean"])
+
+
+def test_configured_transfer_dispatch_keeps_score_names_distinct() -> None:
+    returns_before = jnp.array([[0.0], [0.8]], dtype=jnp.float32)
+    returns_after = jnp.array([[0.1], [0.9]], dtype=jnp.float32)
+
+    raw_scores, _ = compute_configured_editor_transfer_scores(
+        EDITOR_TRANSFER_SCORE_FUNCTION,
+        returns_before,
+        returns_after,
+    )
+    relative_scores, _ = compute_configured_editor_transfer_scores(
+        EDITOR_LOG_RELATIVE_TRANSFER_SCORE_FUNCTION,
+        returns_before,
+        returns_after,
+    )
+
+    assert jnp.allclose(raw_scores, jnp.array([0.1, 0.1]))
+    assert float(relative_scores[0]) > float(relative_scores[1])
 
 
 def _transfer_interval_metrics(is_new: jnp.ndarray) -> dict[str, jnp.ndarray]:
@@ -478,12 +572,30 @@ def test_full_batch_ppo_state_is_scored_then_persisted_or_discarded() -> None:
     assert exploratory_scoring is updated_state
 
 
-@pytest.mark.parametrize("field", ["transfer_target_count", "transfer_num_edits"])
-def test_editor_transfer_config_requires_positive_static_sizes(field: str) -> None:
+@pytest.mark.parametrize(
+    "score_function",
+    [
+        EDITOR_TRANSFER_SCORE_FUNCTION,
+        EDITOR_LOG_RELATIVE_TRANSFER_SCORE_FUNCTION,
+    ],
+)
+@pytest.mark.parametrize(
+    "field",
+    [
+        "transfer_target_count",
+        "transfer_num_edits",
+        "transfer_log_relative_tau",
+    ],
+)
+def test_editor_transfer_config_requires_positive_controls(
+    score_function: str,
+    field: str,
+) -> None:
     config = {
-        "score_function": "editor_transfer",
+        "score_function": score_function,
         "transfer_target_count": 64,
         "transfer_num_edits": 8,
+        "transfer_log_relative_tau": 0.1,
         "use_accel": False,
     }
     config[field] = 0
@@ -492,11 +604,18 @@ def test_editor_transfer_config_requires_positive_static_sizes(field: str) -> No
         validate_editor_transfer_config(config)
 
 
-def test_editor_transfer_rejects_accel() -> None:
+@pytest.mark.parametrize(
+    "score_function",
+    [
+        EDITOR_TRANSFER_SCORE_FUNCTION,
+        EDITOR_LOG_RELATIVE_TRANSFER_SCORE_FUNCTION,
+    ],
+)
+def test_editor_transfer_rejects_accel(score_function: str) -> None:
     with pytest.raises(ValueError, match="does not support --use_accel"):
         validate_editor_transfer_config(
             {
-                "score_function": "editor_transfer",
+                "score_function": score_function,
                 "transfer_target_count": 64,
                 "transfer_num_edits": 8,
                 "use_accel": True,

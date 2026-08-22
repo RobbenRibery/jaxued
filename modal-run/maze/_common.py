@@ -16,9 +16,10 @@ REMOTE_REPOSITORY = Path("/root/jaxued")
 CHECKPOINT_DIRECTORY = REMOTE_REPOSITORY / "checkpoints"
 LOCAL_REPOSITORY = Path(__file__).resolve().parents[2]
 
-DEFAULT_EDITOR_TRANSFER_GPU = "RTX-PRO-6000"
+DEFAULT_EDITOR_TRANSFER_GPU = "L40S"
 DEFAULT_TRANSFER_TARGET_COUNT = 128
 DEFAULT_TRANSFER_NUM_EDITS = 16
+DEFAULT_TRANSFER_LOG_RELATIVE_TAU = 0.1
 WANDB_SECRET_NAME = os.environ.get("JAXUED_WANDB_SECRET", "wandb-secret")
 CHECKPOINT_VOLUME_NAME = os.environ.get(
     "JAXUED_CHECKPOINT_VOLUME",
@@ -71,6 +72,18 @@ class EditorTransferRun(MazeRun):
             raise ValueError("transfer_target_count must be positive")
         if self.transfer_num_edits <= 0:
             raise ValueError("transfer_num_edits must be positive")
+
+
+@dataclass(frozen=True)
+class EditorLogRelativeTransferRun(EditorTransferRun):
+    """Configuration for smoothed log-relative editor-transfer scoring."""
+
+    transfer_log_relative_tau: float = DEFAULT_TRANSFER_LOG_RELATIVE_TAU
+
+    def __post_init__(self) -> None:
+        super().__post_init__()
+        if self.transfer_log_relative_tau <= 0:
+            raise ValueError("transfer_log_relative_tau must be positive")
 
 
 def parse_three_seeds(raw_seeds: str) -> tuple[int, int, int]:
@@ -134,12 +147,14 @@ def build_robust_plr_command(
     )
 
 
-def build_editor_transfer_command(
+def _build_editor_transfer_command(
     run: EditorTransferRun,
+    score_function: str,
+    score_options: tuple[str, ...] = (),
     *,
     python_executable: str = sys.executable,
 ) -> tuple[str, ...]:
-    """Build an editor-transfer training command without side effects."""
+    """Build the options shared by both editor-transfer score variants."""
     exploratory_flag = (
         "--exploratory_grad_updates"
         if run.exploratory_grad_updates
@@ -151,15 +166,46 @@ def build_editor_transfer_command(
         python_executable=python_executable,
     ) + (
         "--score_function",
-        "editor_transfer",
+        score_function,
         "--transfer_target_count",
         str(run.transfer_target_count),
         "--transfer_num_edits",
         str(run.transfer_num_edits),
+    ) + score_options + (
         exploratory_flag,
         "--no-use_accel",
         "--checkpoint_save_interval",
         str(run.checkpoint_save_interval),
+    )
+
+
+def build_editor_transfer_command(
+    run: EditorTransferRun,
+    *,
+    python_executable: str = sys.executable,
+) -> tuple[str, ...]:
+    """Build the historical absolute-gain editor-transfer command."""
+    return _build_editor_transfer_command(
+        run,
+        "editor_transfer",
+        python_executable=python_executable,
+    )
+
+
+def build_editor_log_relative_transfer_command(
+    run: EditorLogRelativeTransferRun,
+    *,
+    python_executable: str = sys.executable,
+) -> tuple[str, ...]:
+    """Build the separately named log-relative editor-transfer command."""
+    return _build_editor_transfer_command(
+        run,
+        "editor_log_relative_transfer",
+        (
+            "--transfer_log_relative_tau",
+            str(run.transfer_log_relative_tau),
+        ),
+        python_executable=python_executable,
     )
 
 

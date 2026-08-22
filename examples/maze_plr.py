@@ -51,12 +51,21 @@ except ModuleNotFoundError:
 DEFAULT_EVAL_FREQ = 200
 DEFAULT_EXPLORATORY_GRAD_UPDATES = False
 DEFAULT_USE_ACCEL = False
+DEFAULT_TRANSFER_LOG_RELATIVE_TAU = 0.1
+EDITOR_TRANSFER_SCORE_FUNCTION = "editor_transfer"
+EDITOR_LOG_RELATIVE_TRANSFER_SCORE_FUNCTION = "editor_log_relative_transfer"
+EDITOR_TRANSFER_SCORE_FUNCTIONS = (
+    EDITOR_TRANSFER_SCORE_FUNCTION,
+    EDITOR_LOG_RELATIVE_TRANSFER_SCORE_FUNCTION,
+)
 
 EDITOR_TRANSFER_STAT_METRIC_KEYS = (
     "transfer_pre_return_mean",
     "transfer_post_return_mean",
     "transfer_gain_mean",
     "transfer_gain_std",
+    "transfer_log_relative_gain_mean",
+    "transfer_log_relative_gain_std",
     "transfer_standard_error_mean",
     "transfer_positive_gain_fraction",
     "transfer_score_q10",
@@ -637,27 +646,109 @@ def _editor_transfer_score_diagnostics(
     }
 
 
-def compute_editor_transfer_scores(
+def compute_log_relative_transfer_gains(
     returns_before: chex.Array,
     returns_after: chex.Array,
-) -> Tuple[chex.Array, Dict[str, chex.Array]]:
-    """Compute per-source mean gains and aggregate diagnostics."""
-    target_count = returns_before.shape[1]
+    log_relative_tau: float = DEFAULT_TRANSFER_LOG_RELATIVE_TAU,
+) -> chex.Array:
+    """Transform paired returns into smoothed per-target log-relative gains."""
+    dtype = jnp.result_type(returns_before, returns_after, jnp.float32)
+    returns_before = returns_before.astype(dtype)
+    returns_after = returns_after.astype(dtype)
+    tau = jnp.asarray(log_relative_tau, dtype=dtype)
+    return jnp.log(returns_after + tau) - jnp.log(returns_before + tau)
 
-    gains = returns_after - returns_before
-    scores = gains.mean(axis=1)
+
+def _compute_editor_transfer_scores_from_gains(
+    returns_before: chex.Array,
+    returns_after: chex.Array,
+    raw_gains: chex.Array,
+    log_relative_gains: chex.Array,
+    score_gains: chex.Array,
+) -> Tuple[chex.Array, Dict[str, chex.Array]]:
+    """Aggregate one selected gain transform and both telemetry views."""
+    target_count = returns_before.shape[1]
+    scores = score_gains.mean(axis=1)
     std_ddof = 1 if target_count > 1 else 0
-    standard_errors = gains.std(axis=1, ddof=std_ddof) / jnp.sqrt(target_count)
+    standard_errors = score_gains.std(axis=1, ddof=std_ddof) / jnp.sqrt(
+        target_count
+    )
     diagnostics = {
         "transfer_pre_return_mean": returns_before.mean(),
         "transfer_post_return_mean": returns_after.mean(),
-        "transfer_gain_mean": gains.mean(),
-        "transfer_gain_std": gains.std(),
+        "transfer_gain_mean": raw_gains.mean(),
+        "transfer_gain_std": raw_gains.std(),
+        "transfer_log_relative_gain_mean": log_relative_gains.mean(),
+        "transfer_log_relative_gain_std": log_relative_gains.std(),
         "transfer_standard_error_mean": standard_errors.mean(),
-        "transfer_positive_gain_fraction": (gains > 0).mean(),
+        "transfer_positive_gain_fraction": (raw_gains > 0).mean(),
         **_editor_transfer_score_diagnostics(scores, standard_errors),
     }
     return scores, diagnostics
+
+
+def compute_editor_transfer_scores(
+    returns_before: chex.Array,
+    returns_after: chex.Array,
+    log_relative_tau: float = DEFAULT_TRANSFER_LOG_RELATIVE_TAU,
+) -> Tuple[chex.Array, Dict[str, chex.Array]]:
+    """Score each source by its mean raw return gain."""
+    raw_gains = returns_after - returns_before
+    log_relative_gains = compute_log_relative_transfer_gains(
+        returns_before=returns_before,
+        returns_after=returns_after,
+        log_relative_tau=log_relative_tau,
+    )
+    return _compute_editor_transfer_scores_from_gains(
+        returns_before=returns_before,
+        returns_after=returns_after,
+        raw_gains=raw_gains,
+        log_relative_gains=log_relative_gains,
+        score_gains=raw_gains,
+    )
+
+
+def compute_editor_log_relative_transfer_scores(
+    returns_before: chex.Array,
+    returns_after: chex.Array,
+    log_relative_tau: float = DEFAULT_TRANSFER_LOG_RELATIVE_TAU,
+) -> Tuple[chex.Array, Dict[str, chex.Array]]:
+    """Score each source by its mean smoothed log-relative return gain."""
+    raw_gains = returns_after - returns_before
+    log_relative_gains = compute_log_relative_transfer_gains(
+        returns_before=returns_before,
+        returns_after=returns_after,
+        log_relative_tau=log_relative_tau,
+    )
+    return _compute_editor_transfer_scores_from_gains(
+        returns_before=returns_before,
+        returns_after=returns_after,
+        raw_gains=raw_gains,
+        log_relative_gains=log_relative_gains,
+        score_gains=log_relative_gains,
+    )
+
+
+def compute_configured_editor_transfer_scores(
+    score_function: str,
+    returns_before: chex.Array,
+    returns_after: chex.Array,
+    log_relative_tau: float = DEFAULT_TRANSFER_LOG_RELATIVE_TAU,
+) -> Tuple[chex.Array, Dict[str, chex.Array]]:
+    """Dispatch one editor-transfer score name to its pure gain transform."""
+    if score_function == EDITOR_TRANSFER_SCORE_FUNCTION:
+        return compute_editor_transfer_scores(
+            returns_before=returns_before,
+            returns_after=returns_after,
+            log_relative_tau=log_relative_tau,
+        )
+    if score_function == EDITOR_LOG_RELATIVE_TRANSFER_SCORE_FUNCTION:
+        return compute_editor_log_relative_transfer_scores(
+            returns_before=returns_before,
+            returns_after=returns_after,
+            log_relative_tau=log_relative_tau,
+        )
+    raise ValueError(f"Unknown editor-transfer score function: {score_function}")
 
 
 def _masked_interval_mean(values: chex.Array, mask: chex.Array) -> chex.Array:
@@ -1723,20 +1814,29 @@ def normalize_run_name(name: str) -> str:
 
 def validate_editor_transfer_config(config: Dict[str, Any]) -> None:
     """Validate the static shape and ownership constraints of editor transfer."""
-    if config["score_function"] != "editor_transfer":
+    if config["score_function"] not in EDITOR_TRANSFER_SCORE_FUNCTIONS:
         return
     if config["transfer_target_count"] < 1:
         raise ValueError("--transfer_target_count must be >= 1.")
     if config["transfer_num_edits"] < 1:
         raise ValueError("--transfer_num_edits must be >= 1.")
+    if (
+        config.get(
+            "transfer_log_relative_tau", DEFAULT_TRANSFER_LOG_RELATIVE_TAU
+        )
+        <= 0
+    ):
+        raise ValueError("--transfer_log_relative_tau must be > 0.")
     if config["use_accel"]:
         raise ValueError(
-            "--score_function editor_transfer does not support --use_accel."
+            f"--score_function {config['score_function']} does not support "
+            "--use_accel."
         )
 
 
 def main(config=None, project="JAXUED_TEST"):
     validate_editor_transfer_config(config)
+    uses_editor_transfer = config["score_function"] in EDITOR_TRANSFER_SCORE_FUNCTIONS
     tags = []
     if not config["exploratory_grad_updates"]:
         tags.append("robust")
@@ -1772,7 +1872,7 @@ def main(config=None, project="JAXUED_TEST"):
             stats["update_count"] * config["num_train_envs"] * config["num_steps"]
         )
         transfer_env_steps = 0
-        if config["score_function"] == "editor_transfer":
+        if uses_editor_transfer:
             transfer_env_steps = (
                 stats["update_count"]
                 * 2
@@ -1821,12 +1921,16 @@ def main(config=None, project="JAXUED_TEST"):
                     }
                 )
 
-        if config["score_function"] == "editor_transfer":
+        if uses_editor_transfer:
             log_dict.update(editor_transfer_interval_log_dict(stats))
             log_dict.update(
                 {
                     "transfer/target_count": config["transfer_target_count"],
                     "transfer/chain_length": config["transfer_num_edits"],
+                    "transfer/log_relative_tau": config.get(
+                        "transfer_log_relative_tau",
+                        DEFAULT_TRANSFER_LOG_RELATIVE_TAU,
+                    ),
                     "transfer/eval_env_steps_interval": stats[
                         "transfer_eval_env_steps"
                     ],
@@ -1948,7 +2052,7 @@ def main(config=None, project="JAXUED_TEST"):
         )
         pholder_level = sample_random_level(jax.random.PRNGKey(0))
         level_extras = {"max_return": -jnp.inf}
-        if config["score_function"] == "editor_transfer":
+        if uses_editor_transfer:
             placeholder_target_bank = jax.tree_util.tree_map(
                 lambda leaf: jnp.repeat(
                     jnp.asarray(leaf)[None, ...],
@@ -2023,7 +2127,7 @@ def main(config=None, project="JAXUED_TEST"):
 
             transfer_metrics = (
                 empty_editor_transfer_metrics()
-                if config["score_function"] == "editor_transfer"
+                if uses_editor_transfer
                 else {}
             )
 
@@ -2033,7 +2137,7 @@ def main(config=None, project="JAXUED_TEST"):
             new_levels = jax.vmap(sample_random_level)(
                 jax.random.split(rng_levels, config["num_train_envs"])
             )
-            if config["score_function"] == "editor_transfer":
+            if uses_editor_transfer:
                 rng, target_banks = resolve_transfer_target_banks(
                     rng=rng,
                     sampler=sampler,
@@ -2127,7 +2231,7 @@ def main(config=None, project="JAXUED_TEST"):
             policy_before_update = train_state
             apply_update = (
                 True
-                if config["score_function"] == "editor_transfer"
+                if uses_editor_transfer
                 else config["exploratory_grad_updates"]
             )
             (rng, updated_train_state), (losses, grad_norms) = update_actor_critic_rnn(
@@ -2146,7 +2250,7 @@ def main(config=None, project="JAXUED_TEST"):
                 compute_per_step_grads=compute_grads,
             )
 
-            if config["score_function"] == "editor_transfer":
+            if uses_editor_transfer:
                 train_state, scoring_state = select_editor_transfer_states(
                     original_state=policy_before_update,
                     updated_state=updated_train_state,
@@ -2159,9 +2263,17 @@ def main(config=None, project="JAXUED_TEST"):
                     evaluation_batch=transfer_evaluation,
                     max_episode_length=env_params.max_steps_in_episode,
                 )
-                scores, transfer_diagnostics = compute_editor_transfer_scores(
+                (
+                    scores,
+                    transfer_diagnostics,
+                ) = compute_configured_editor_transfer_scores(
+                    score_function=config["score_function"],
                     returns_before=returns_before,
                     returns_after=returns_after,
+                    log_relative_tau=config.get(
+                        "transfer_log_relative_tau",
+                        DEFAULT_TRANSFER_LOG_RELATIVE_TAU,
+                    ),
                 )
                 transfer_metrics = {
                     **transfer_diagnostics,
@@ -2189,7 +2301,7 @@ def main(config=None, project="JAXUED_TEST"):
             else:
                 train_state = updated_train_state
 
-            if config["score_function"] not in ("s_in", "editor_transfer"):
+            if config["score_function"] != "s_in" and not uses_editor_transfer:
                 # Existing score functions are computed after the PPO update path.
                 scores = compute_score(
                     config,
@@ -2201,7 +2313,7 @@ def main(config=None, project="JAXUED_TEST"):
                     grad_norms=grad_norms,
                 )
             level_extras = {"max_return": max_returns}
-            if config["score_function"] == "editor_transfer":
+            if uses_editor_transfer:
                 level_extras.update(
                     {
                         "transfer_targets": target_banks,
@@ -2256,10 +2368,10 @@ def main(config=None, project="JAXUED_TEST"):
             stored_level_extras = level_sampler.get_levels_extra(sampler, level_inds)
             transfer_metrics = (
                 empty_editor_transfer_metrics()
-                if config["score_function"] == "editor_transfer"
+                if uses_editor_transfer
                 else {}
             )
-            if config["score_function"] == "editor_transfer":
+            if uses_editor_transfer:
                 target_banks = stored_level_extras["transfer_targets"]
                 rng, transfer_evaluation = prepare_editor_transfer_evaluation(
                     rng=rng,
@@ -2356,7 +2468,7 @@ def main(config=None, project="JAXUED_TEST"):
                 compute_per_step_grads=compute_grads,
             )
 
-            if config["score_function"] == "editor_transfer":
+            if uses_editor_transfer:
                 returns_after = evaluate_editor_transfer_returns(
                     env=eval_env,
                     env_params=env_params,
@@ -2364,9 +2476,17 @@ def main(config=None, project="JAXUED_TEST"):
                     evaluation_batch=transfer_evaluation,
                     max_episode_length=env_params.max_steps_in_episode,
                 )
-                scores, transfer_diagnostics = compute_editor_transfer_scores(
+                (
+                    scores,
+                    transfer_diagnostics,
+                ) = compute_configured_editor_transfer_scores(
+                    score_function=config["score_function"],
                     returns_before=returns_before,
                     returns_after=returns_after,
+                    log_relative_tau=config.get(
+                        "transfer_log_relative_tau",
+                        DEFAULT_TRANSFER_LOG_RELATIVE_TAU,
+                    ),
                 )
                 scores, max_returns = aggregate_replay_transfer_updates(
                     level_indices=level_inds,
@@ -2401,7 +2521,7 @@ def main(config=None, project="JAXUED_TEST"):
                     grad_norms=grad_norms,
                 )
             level_extras = {"max_return": max_returns}
-            if config["score_function"] == "editor_transfer":
+            if uses_editor_transfer:
                 level_extras.update(
                     {
                         "transfer_targets": target_banks,
@@ -2450,7 +2570,7 @@ def main(config=None, project="JAXUED_TEST"):
             sampler = train_state.sampler
             transfer_metrics = (
                 empty_editor_transfer_metrics()
-                if config["score_function"] == "editor_transfer"
+                if uses_editor_transfer
                 else {}
             )
             rng, rng_mutate, rng_reset = jax.random.split(rng, 3)
@@ -2684,7 +2804,7 @@ def main(config=None, project="JAXUED_TEST"):
         (rng, train_state), metrics = jax.lax.scan(
             train_step, runner_state, None, config["eval_freq"]
         )
-        if config["score_function"] == "editor_transfer":
+        if uses_editor_transfer:
             metrics = aggregate_editor_transfer_interval_metrics(metrics)
 
         # Eval
@@ -2874,14 +2994,16 @@ if __name__ == "__main__":
             "abs_pg",
             "ppo_value_loss",
             "s_in",
-            "editor_transfer",
+            EDITOR_TRANSFER_SCORE_FUNCTION,
+            EDITOR_LOG_RELATIVE_TRANSFER_SCORE_FUNCTION,
         ],
         help="Score function for level prioritization. "
         "abs_pg uses policy gradient magnitudes. "
         "ppo_value_loss uses PPO clipped value loss magnitude. "
         "s_in uses holdout PPO total-loss reduction after virtual updates. "
-        "editor_transfer uses paired before/after returns on fixed edited "
-        "target banks.",
+        "editor_transfer uses paired absolute before/after return gains. "
+        "editor_log_relative_transfer uses paired smoothed log-relative gains. "
+        "Both use fixed edited target banks.",
     )
     group.add_argument(
         "--transfer_target_count",
@@ -2894,6 +3016,12 @@ if __name__ == "__main__":
         type=int,
         default=16,
         help="Number of sequential editor applications in every target chain.",
+    )
+    group.add_argument(
+        "--transfer_log_relative_tau",
+        type=float,
+        default=DEFAULT_TRANSFER_LOG_RELATIVE_TAU,
+        help="Positive additive smoothing used by the log-relative transfer score.",
     )
     group.add_argument(
         "--sin_n_virtual_updates",
