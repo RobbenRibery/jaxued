@@ -391,6 +391,34 @@ def generate_transfer_target_bank(
     )
 
 
+def count_transfer_target_duplicates(target_bank: Level) -> chex.Array:
+    """Count targets that repeat an earlier level in one fixed bank.
+
+    The wall maps are packed before comparison so the exact duplicate check has
+    a small intermediate representation. This function runs only when a new
+    bank is generated; the resulting scalar is stored with the bank for cheap
+    logging and replay reuse.
+    """
+    target_count = target_bank.wall_map.shape[0]
+    packed_wall_maps = jnp.packbits(
+        target_bank.wall_map.reshape(target_count, -1), axis=1
+    ).astype(jnp.uint32)
+    signatures = jnp.concatenate(
+        (
+            packed_wall_maps,
+            target_bank.goal_pos.reshape(target_count, -1).astype(jnp.uint32),
+            target_bank.agent_pos.reshape(target_count, -1).astype(jnp.uint32),
+            target_bank.agent_dir.reshape(target_count, -1).astype(jnp.uint32),
+            target_bank.width.reshape(target_count, -1).astype(jnp.uint32),
+            target_bank.height.reshape(target_count, -1).astype(jnp.uint32),
+        ),
+        axis=1,
+    )
+    same_target = (signatures[:, None, :] == signatures[None, :, :]).all(axis=-1)
+    earlier_target = jnp.arange(target_count)[:, None] > jnp.arange(target_count)
+    return (same_target & earlier_target).any(axis=1).sum(dtype=jnp.int32)
+
+
 def resolve_transfer_target_banks(
     rng: chex.PRNGKey,
     sampler: core.FrozenDict[str, chex.ArrayTree],
@@ -398,7 +426,7 @@ def resolve_transfer_target_banks(
     mutate_level: Callable[[chex.PRNGKey, Level, int], Level],
     target_count: int,
     num_edits: int,
-) -> Tuple[chex.PRNGKey, Level]:
+) -> Tuple[chex.PRNGKey, Level, chex.Array]:
     """Resolve one fixed target bank for every new source candidate.
 
     Stored PLR duplicates reuse the stored target bank. Later duplicates within
@@ -414,20 +442,25 @@ def resolve_transfer_target_banks(
         num_edits: Editor applications in every chain.
 
     Returns:
-        Updated key and target banks with leading shape ``(N, target_count, ...)``.
+        Updated key, target banks with leading shape ``(N, target_count, ...)``,
+        and one duplicate count per bank.
     """
     source_count = jax.tree_util.tree_leaves(source_levels)[0].shape[0]
     stored_target_banks = sampler["levels_extra"]["transfer_targets"]
+    stored_duplicate_counts = sampler["levels_extra"][
+        "transfer_target_duplicate_count"
+    ]
     placeholder_bank = jax.tree_util.tree_map(lambda leaf: leaf[0], stored_target_banks)
     resolved_banks = jax.tree_util.tree_map(
         lambda leaf: jnp.repeat(leaf[None, ...], source_count, axis=0),
         placeholder_bank,
     )
+    resolved_duplicate_counts = jnp.zeros(source_count, dtype=jnp.int32)
     source_indices = jnp.arange(source_count)
     stored_indices = jnp.arange(sampler["scores"].shape[0])
 
     def resolve_one(carry, source_index):
-        rng_carry, banks = carry
+        rng_carry, banks, duplicate_counts = carry
         rng_carry, rng_generate = jax.random.split(rng_carry)
         source = jax.tree_util.tree_map(lambda leaf: leaf[source_index], source_levels)
 
@@ -446,27 +479,37 @@ def resolve_transfer_target_banks(
         earlier_index = earlier_matches.argmax()
 
         def use_stored_bank(_):
-            return jax.tree_util.tree_map(
-                lambda leaf: leaf[stored_index], stored_target_banks
+            return (
+                jax.tree_util.tree_map(
+                    lambda leaf: leaf[stored_index], stored_target_banks
+                ),
+                stored_duplicate_counts[stored_index],
             )
 
         def use_earlier_or_generate(_):
-            return jax.lax.cond(
-                has_earlier_match,
-                lambda __: jax.tree_util.tree_map(
-                    lambda leaf: leaf[earlier_index], banks
-                ),
-                lambda __: generate_transfer_target_bank(
+            def generate_bank(__):
+                bank = generate_transfer_target_bank(
                     rng=rng_generate,
                     source_level=source,
                     mutate_level=mutate_level,
                     target_count=target_count,
                     num_edits=num_edits,
+                )
+                return bank, count_transfer_target_duplicates(bank)
+
+            return jax.lax.cond(
+                has_earlier_match,
+                lambda __: (
+                    jax.tree_util.tree_map(
+                        lambda leaf: leaf[earlier_index], banks
+                    ),
+                    duplicate_counts[earlier_index],
                 ),
+                generate_bank,
                 operand=None,
             )
 
-        target_bank = jax.lax.cond(
+        target_bank, duplicate_count = jax.lax.cond(
             has_stored_match,
             use_stored_bank,
             use_earlier_or_generate,
@@ -477,14 +520,15 @@ def resolve_transfer_target_banks(
             banks,
             target_bank,
         )
-        return (rng_carry, banks), None
+        duplicate_counts = duplicate_counts.at[source_index].set(duplicate_count)
+        return (rng_carry, banks, duplicate_counts), None
 
-    (rng, resolved_banks), _ = jax.lax.scan(
+    (rng, resolved_banks, resolved_duplicate_counts), _ = jax.lax.scan(
         resolve_one,
-        (rng, resolved_banks),
+        (rng, resolved_banks, resolved_duplicate_counts),
         source_indices,
     )
-    return rng, resolved_banks
+    return rng, resolved_banks, resolved_duplicate_counts
 
 
 def evaluate_returns_rnn(
@@ -1203,9 +1247,14 @@ def train_state_to_log_dict(
         }
     )
     if "levels_extra" in sampler and "has_transfer_targets" in sampler["levels_extra"]:
-        log["level_sampler/transfer_target_bank_count"] = (
-            sampler["levels_extra"]["has_transfer_targets"] & idx
-        ).sum()
+        target_bank_mask = sampler["levels_extra"]["has_transfer_targets"] & idx
+        log["level_sampler/transfer_target_bank_count"] = target_bank_mask.sum()
+        if "transfer_target_duplicate_count" in sampler["levels_extra"]:
+            log["level_sampler/transfer_target_duplicate_count"] = jnp.where(
+                target_bank_mask,
+                sampler["levels_extra"]["transfer_target_duplicate_count"],
+                0,
+            ).sum()
 
     return {
         "log": log,
@@ -2065,6 +2114,9 @@ def main(config=None, project="JAXUED_TEST"):
                 {
                     "transfer_targets": placeholder_target_bank,
                     "has_transfer_targets": jnp.array(False),
+                    "transfer_target_duplicate_count": jnp.array(
+                        0, dtype=jnp.int32
+                    ),
                 }
             )
         sampler = level_sampler.initialize(pholder_level, level_extras)
@@ -2138,7 +2190,11 @@ def main(config=None, project="JAXUED_TEST"):
                 jax.random.split(rng_levels, config["num_train_envs"])
             )
             if uses_editor_transfer:
-                rng, target_banks = resolve_transfer_target_banks(
+                (
+                    rng,
+                    target_banks,
+                    target_bank_duplicate_counts,
+                ) = resolve_transfer_target_banks(
                     rng=rng,
                     sampler=sampler,
                     source_levels=new_levels,
@@ -2320,6 +2376,9 @@ def main(config=None, project="JAXUED_TEST"):
                         "has_transfer_targets": jnp.ones(
                             config["num_train_envs"], dtype=jnp.bool_
                         ),
+                        "transfer_target_duplicate_count": (
+                            target_bank_duplicate_counts
+                        ),
                     }
                 )
             sampler, _ = level_sampler.insert_batch(
@@ -2373,6 +2432,9 @@ def main(config=None, project="JAXUED_TEST"):
             )
             if uses_editor_transfer:
                 target_banks = stored_level_extras["transfer_targets"]
+                target_bank_duplicate_counts = stored_level_extras[
+                    "transfer_target_duplicate_count"
+                ]
                 rng, transfer_evaluation = prepare_editor_transfer_evaluation(
                     rng=rng,
                     env=eval_env,
@@ -2527,6 +2589,9 @@ def main(config=None, project="JAXUED_TEST"):
                         "transfer_targets": target_banks,
                         "has_transfer_targets": jnp.ones(
                             config["num_train_envs"], dtype=jnp.bool_
+                        ),
+                        "transfer_target_duplicate_count": (
+                            target_bank_duplicate_counts
                         ),
                     }
                 )

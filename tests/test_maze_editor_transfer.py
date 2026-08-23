@@ -21,6 +21,7 @@ from examples.maze_plr import (
     _level_match_mask,
     aggregate_editor_transfer_interval_metrics,
     aggregate_replay_transfer_updates,
+    count_transfer_target_duplicates,
     compute_gae,
     compute_configured_editor_transfer_scores,
     compute_editor_log_relative_transfer_scores,
@@ -145,6 +146,17 @@ def test_target_bank_generation_is_deterministic_and_keeps_all_draws() -> None:
     assert _tree_equal(first, second)
 
 
+def test_target_bank_duplicate_count_counts_repeated_targets_after_first() -> None:
+    generator = make_level_generator(5, 5, 3)
+    first = generator(jax.random.PRNGKey(51))
+    second = generator(jax.random.PRNGKey(52))
+    bank = _stack_levels(first, second, first, first, second)
+
+    duplicate_count = count_transfer_target_duplicates(bank)
+
+    assert int(duplicate_count) == 3
+
+
 def test_resolver_reuses_stored_and_first_in_batch_target_banks() -> None:
     """Stored and within-batch source duplicates should not receive new banks."""
     generator = make_level_generator(5, 5, 3)
@@ -162,6 +174,7 @@ def test_resolver_reuses_stored_and_first_in_batch_target_banks() -> None:
             "max_return": -jnp.inf,
             "transfer_targets": placeholder_bank,
             "has_transfer_targets": jnp.array(False),
+            "transfer_target_duplicate_count": jnp.array(0, dtype=jnp.int32),
         },
     )
     stored_bank = generate_transfer_target_bank(
@@ -179,12 +192,13 @@ def test_resolver_reuses_stored_and_first_in_batch_target_banks() -> None:
             "max_return": jnp.array(0.0),
             "transfer_targets": stored_bank,
             "has_transfer_targets": jnp.array(True),
+            "transfer_target_duplicate_count": jnp.array(2, dtype=jnp.int32),
         },
     )
     assert int(stored_index) == 0
 
     candidates = _stack_levels(stored_source, new_source, new_source)
-    _, resolved = resolve_transfer_target_banks(
+    _, resolved, duplicate_counts = resolve_transfer_target_banks(
         rng=jax.random.PRNGKey(9),
         sampler=sampler,
         source_levels=candidates,
@@ -200,6 +214,8 @@ def test_resolver_reuses_stored_and_first_in_batch_target_banks() -> None:
         jax.tree_util.tree_map(lambda leaf: leaf[1], resolved),
         jax.tree_util.tree_map(lambda leaf: leaf[2], resolved),
     )
+    assert int(duplicate_counts[0]) == 2
+    assert int(duplicate_counts[1]) == int(duplicate_counts[2])
 
 
 def test_editor_transfer_score_remains_mean_raw_gain_with_raw_se() -> None:
@@ -431,6 +447,48 @@ def test_level_sampler_log_dict_exposes_bank_score_diagnostics() -> None:
     assert float(log["level_sampler/score_q50"]) == 4.0
     assert float(log["level_sampler/score_q90"]) == 4.0
     assert jnp.isnan(log["level_sampler/top_score_gap"])
+
+
+def test_level_sampler_log_dict_reduces_stored_target_duplicate_scalars() -> None:
+    source = make_level_generator(5, 5, 3)(jax.random.PRNGKey(53))
+    target_bank = jax.tree_util.tree_map(
+        lambda leaf: jnp.repeat(jnp.asarray(leaf)[None, ...], 4, axis=0), source
+    )
+    sampler_api = LevelSampler(capacity=4)
+    sampler = sampler_api.initialize(
+        source,
+        {
+            "max_return": -jnp.inf,
+            "transfer_targets": target_bank,
+            "has_transfer_targets": jnp.array(False),
+            "transfer_target_duplicate_count": jnp.array(0, dtype=jnp.int32),
+        },
+    )
+    for index, duplicate_count in enumerate((1, 3)):
+        sampler, _ = sampler_api.insert(
+            sampler,
+            source.replace(agent_dir=source.agent_dir + index),
+            score=jnp.array(4.0),
+            level_extra={
+                "max_return": jnp.array(0.0),
+                "transfer_targets": target_bank,
+                "has_transfer_targets": jnp.array(True),
+                "transfer_target_duplicate_count": jnp.array(
+                    duplicate_count, dtype=jnp.int32
+                ),
+            },
+        )
+    state = SimpleNamespace(
+        sampler=sampler,
+        num_dr_updates=1,
+        num_replay_updates=0,
+        num_mutation_updates=0,
+    )
+
+    log = train_state_to_log_dict(state, sampler_api)["log"]
+
+    assert int(log["level_sampler/transfer_target_bank_count"]) == 2
+    assert int(log["level_sampler/transfer_target_duplicate_count"]) == 4
 
 
 def test_editor_transfer_interval_log_dict_emits_all_diagnostic_keys() -> None:
