@@ -20,16 +20,19 @@ sys.modules[SPEC.name] = launcher
 SPEC.loader.exec_module(launcher)
 
 
-def test_parses_requested_three_seed_sweep() -> None:
+def test_parses_requested_seed_sweeps() -> None:
+    assert launcher.parse_seeds("3") == (3,)
     assert launcher.parse_seeds("3,4,5") == (3, 4, 5)
+    single_seed_sweep = launcher.parse_args(["--seeds", "3"])
     sweep = launcher.parse_args(["--seeds", "3,4,5"])
+    assert single_seed_sweep.seeds == (3,)
     assert sweep.seeds == (3, 4, 5)
 
 
 @pytest.mark.parametrize(
     ("raw_seeds", "message"),
     (
-        ("0,1", "exactly three"),
+        ("", "at least one"),
         ("0,1,1", "distinct"),
         ("0,-1,2", "non-negative"),
         ("0,one,2", "integers"),

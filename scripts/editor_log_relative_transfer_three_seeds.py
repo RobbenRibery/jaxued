@@ -1,4 +1,4 @@
-"""Run three log-relative editor-transfer seeds on one local GPU.
+"""Run one or more log-relative editor-transfer seeds on one local GPU.
 
 This is the local/Runpod counterpart of
 ``modal-run/maze/editor_log_relative_transfer_three_seeds.py``. It preserves the
@@ -30,11 +30,11 @@ DEFAULT_TRANSFER_LOG_RELATIVE_TAU = 0.1
 
 @dataclass(frozen=True)
 class LocalSweep:
-    """Validated configuration for a sequential local three-seed sweep."""
+    """Validated configuration for a sequential local seed sweep."""
 
     run_name: str = "maze_editor_log_relative_transfer_three_seeds"
     project: str = "JAXUED_TEST"
-    seeds: tuple[int, int, int] = DEFAULT_SEEDS
+    seeds: tuple[int, ...] = DEFAULT_SEEDS
     num_updates: int = 30_000
     checkpoint_save_interval: int = 10
     transfer_target_count: int = DEFAULT_TRANSFER_TARGET_COUNT
@@ -47,9 +47,9 @@ class LocalSweep:
             raise ValueError("run_name must not be empty")
         if not self.project.strip():
             raise ValueError("project must not be empty")
-        if len(self.seeds) != 3:
-            raise ValueError("seeds must contain exactly three integers")
-        if len(set(self.seeds)) != 3:
+        if not self.seeds:
+            raise ValueError("seeds must contain at least one integer")
+        if len(set(self.seeds)) != len(self.seeds):
             raise ValueError("seeds must be distinct")
         if any(seed < 0 for seed in self.seeds):
             raise ValueError("seeds must be non-negative")
@@ -74,24 +74,24 @@ class SeedRunResult:
     checkpoint_path: Path
 
 
-def parse_seeds(raw_seeds: str) -> tuple[int, int, int]:
-    """Parse exactly three distinct, non-negative comma-separated seeds."""
+def parse_seeds(raw_seeds: str) -> tuple[int, ...]:
+    """Parse one or more distinct, non-negative comma-separated seeds."""
     parts = [part.strip() for part in raw_seeds.split(",")]
-    if len(parts) != 3 or any(not part for part in parts):
+    if any(not part for part in parts):
         raise argparse.ArgumentTypeError(
-            "seeds must contain exactly three comma-separated integers"
+            "seeds must contain at least one comma-separated integer"
         )
     try:
         seeds = tuple(int(part) for part in parts)
     except ValueError as error:
         raise argparse.ArgumentTypeError(
-            "seeds must contain exactly three comma-separated integers"
+            "seeds must contain comma-separated integers"
         ) from error
     if any(seed < 0 for seed in seeds):
         raise argparse.ArgumentTypeError("seeds must be non-negative")
-    if len(set(seeds)) != 3:
+    if len(set(seeds)) != len(seeds):
         raise argparse.ArgumentTypeError("seeds must be distinct")
-    return cast(tuple[int, int, int], seeds)
+    return cast(tuple[int, ...], seeds)
 
 
 def build_seed_command(
