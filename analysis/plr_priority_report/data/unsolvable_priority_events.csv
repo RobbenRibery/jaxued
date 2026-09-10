@@ -1,0 +1,3 @@
+run_id,run_url,algorithm,seed,num_updates,solve_rate,solve_rate_plus_1000,mean_solvable,dominant_share,dominant_exact_hash,dominant_level_solvable,dominant_level_shortest_path,exact_unique_ratio,simpson_effective_size
+73i14emu,https://wandb.ai/rundong-liu/JAXUED_TEST/runs/73i14emu,Mean absolute advantage,2,28000,0.3375000059604645,0.16250000894069672,0.21875,0.78125,de92364a8b66ca3da41d,0.0,,0.25,1.620253164556962
+93e6u91i,https://wandb.ai/rundong-liu/JAXUED_TEST/runs/93e6u91i,Log-relative transfer,3,13000,0.3125,0.32499998807907104,0.25,0.75,d0cc26c7b0489e7da434,0.0,,0.21875,1.735593220338983

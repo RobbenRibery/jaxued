@@ -28,6 +28,12 @@ from jaxued.environments.maze import (
     make_level_mutator_minimax,
 )
 from jaxued.level_sampler import LevelSampler
+from jaxued.environments.maze.solved_history import (
+    SolvedLevelHistory,
+    check_solved_history_capacity,
+    create_solved_level_history,
+    observe_level_successes,
+)
 from jaxued.utils import (
     measure_s_in,
     compute_max_returns,
@@ -52,11 +58,46 @@ DEFAULT_EVAL_FREQ = 200
 DEFAULT_EXPLORATORY_GRAD_UPDATES = False
 DEFAULT_USE_ACCEL = False
 DEFAULT_TRANSFER_LOG_RELATIVE_TAU = 0.1
+DEFAULT_TRANSFER_SOLVED_PRIOR_ALPHA = 1.0
+DEFAULT_TRANSFER_SOLVED_PRIOR_BETA = 1.0
+DEFAULT_TRANSFER_SOLVED_CONFIDENCE = 0.8
 EDITOR_TRANSFER_SCORE_FUNCTION = "editor_transfer"
 EDITOR_LOG_RELATIVE_TRANSFER_SCORE_FUNCTION = "editor_log_relative_transfer"
+EDITOR_SOLVED_INFORMED_LOG_RELATIVE_TRANSFER_SCORE_FUNCTION = (
+    "editor_solved_informed_log_relative_transfer"
+)
 EDITOR_TRANSFER_SCORE_FUNCTIONS = (
     EDITOR_TRANSFER_SCORE_FUNCTION,
     EDITOR_LOG_RELATIVE_TRANSFER_SCORE_FUNCTION,
+    EDITOR_SOLVED_INFORMED_LOG_RELATIVE_TRANSFER_SCORE_FUNCTION,
+)
+
+SOLVED_INFORMED_TRANSFER_STAT_METRIC_KEYS = (
+    "transfer_base_score_mean",
+    "transfer_base_score_q10",
+    "transfer_base_score_q50",
+    "transfer_base_score_q90",
+    "transfer_base_top_score_gap",
+    "transfer_base_score_se_ratio_mean",
+    "transfer_base_score_se_abs_ratio_q50",
+    "transfer_base_score_se_abs_ratio_q90",
+    "transfer_base_score_se_positive_gt_1_fraction",
+    "transfer_base_score_se_positive_gt_2_fraction",
+    "transfer_solved_confidence_mean",
+    "transfer_solved_confidence_q10",
+    "transfer_solved_confidence_q50",
+    "transfer_solved_confidence_q90",
+    "transfer_solved_penalty_mean",
+    "transfer_solved_penalty_q10",
+    "transfer_solved_penalty_q50",
+    "transfer_solved_penalty_q90",
+    "transfer_current_solved_fraction",
+    "transfer_current_solved_group_fraction",
+    "transfer_newly_solved_fraction",
+    "transfer_ever_solved_fraction",
+    "transfer_failure_increment_mean",
+    "transfer_repeated_source_count",
+    "transfer_max_source_multiplicity",
 )
 
 EDITOR_TRANSFER_STAT_METRIC_KEYS = (
@@ -77,6 +118,7 @@ EDITOR_TRANSFER_STAT_METRIC_KEYS = (
     "transfer_score_se_abs_ratio_q90",
     "transfer_score_se_positive_gt_1_fraction",
     "transfer_score_se_positive_gt_2_fraction",
+    *SOLVED_INFORMED_TRANSFER_STAT_METRIC_KEYS,
 )
 
 
@@ -95,6 +137,8 @@ class TrainState(BaseTrainState):
     dr_last_level_batch: chex.ArrayTree = struct.field(pytree_node=True)
     replay_last_level_batch: chex.ArrayTree = struct.field(pytree_node=True)
     mutation_last_level_batch: chex.ArrayTree = struct.field(pytree_node=True)
+    # Source success is lifetime evidence, not an evictable PLR entry property.
+    solved_level_history: Optional[SolvedLevelHistory] = None
 
 
 @struct.dataclass
@@ -107,6 +151,26 @@ class TransferEvaluationBatch:
     rollout_rng: chex.PRNGKey = struct.field(pytree_node=True)
     source_count: int = struct.field(pytree_node=False)
     target_count: int = struct.field(pytree_node=False)
+
+
+@struct.dataclass
+class SolvedInformedTransferUpdate:
+    """One duplicate-safe solved-informed scoring transition."""
+
+    scores: chex.Array
+    base_scores: chex.Array
+    failure_counts: chex.Array
+    ever_solved: chex.Array
+    confidences: chex.Array
+    penalties: chex.Array
+    current_solved: chex.Array
+    group_current_solved: chex.Array
+    group_representatives: chex.Array
+    newly_solved: chex.Array
+    failure_increments: chex.Array
+    max_returns: chex.Array
+    repeated_source_count: chex.Array
+    max_source_multiplicity: chex.Array
 
 
 # region PPO helper functions
@@ -447,9 +511,7 @@ def resolve_transfer_target_banks(
     """
     source_count = jax.tree_util.tree_leaves(source_levels)[0].shape[0]
     stored_target_banks = sampler["levels_extra"]["transfer_targets"]
-    stored_duplicate_counts = sampler["levels_extra"][
-        "transfer_target_duplicate_count"
-    ]
+    stored_duplicate_counts = sampler["levels_extra"]["transfer_target_duplicate_count"]
     placeholder_bank = jax.tree_util.tree_map(lambda leaf: leaf[0], stored_target_banks)
     resolved_banks = jax.tree_util.tree_map(
         lambda leaf: jnp.repeat(leaf[None, ...], source_count, axis=0),
@@ -500,9 +562,7 @@ def resolve_transfer_target_banks(
             return jax.lax.cond(
                 has_earlier_match,
                 lambda __: (
-                    jax.tree_util.tree_map(
-                        lambda leaf: leaf[earlier_index], banks
-                    ),
+                    jax.tree_util.tree_map(lambda leaf: leaf[earlier_index], banks),
                     duplicate_counts[earlier_index],
                 ),
                 generate_bank,
@@ -529,6 +589,62 @@ def resolve_transfer_target_banks(
         source_indices,
     )
     return rng, resolved_banks, resolved_duplicate_counts
+
+
+def resolve_new_solved_informed_history(
+    sampler: core.FrozenDict[str, chex.ArrayTree],
+    source_levels: Level,
+    duplicate_check: bool,
+) -> Tuple[chex.Array, chex.Array, chex.Array, chex.Array]:
+    """Resolve PLR-local metadata; callers merge append-only success evidence."""
+    source_count = jax.tree_util.tree_leaves(source_levels)[0].shape[0]
+    source_indices = jnp.arange(source_count, dtype=jnp.int32)
+    capacity = sampler["scores"].shape[0]
+
+    if not duplicate_check:
+        return (
+            capacity + source_indices,
+            jnp.zeros(source_count, dtype=jnp.int32),
+            jnp.zeros(source_count, dtype=jnp.bool_),
+            jnp.full(source_count, -jnp.inf, dtype=jnp.float32),
+        )
+
+    stored_match_matrix = jax.vmap(
+        lambda source: _level_match_mask(sampler["levels"], source)
+    )(source_levels)
+    stored_match_matrix &= jnp.arange(capacity)[None, :] < sampler["size"]
+    has_stored_match = stored_match_matrix.any(axis=1)
+    stored_indices = stored_match_matrix.argmax(axis=1)
+    safe_stored_indices = jnp.where(has_stored_match, stored_indices, 0)
+
+    batch_match_matrix = jax.vmap(
+        lambda source: _level_match_mask(source_levels, source)
+    )(source_levels)
+    earlier_or_self = source_indices[None, :] <= source_indices[:, None]
+    first_batch_indices = (batch_match_matrix & earlier_or_self).argmax(axis=1)
+    group_ids = jnp.where(
+        has_stored_match,
+        stored_indices,
+        capacity + first_batch_indices,
+    )
+
+    extras = sampler["levels_extra"]
+    prior_failure_counts = jnp.where(
+        has_stored_match,
+        extras["transfer_unsolved_failure_count"][safe_stored_indices],
+        0,
+    ).astype(jnp.int32)
+    prior_ever_solved = jnp.where(
+        has_stored_match,
+        extras["transfer_ever_solved"][safe_stored_indices],
+        False,
+    )
+    prior_max_returns = jnp.where(
+        has_stored_match,
+        extras["max_return"][safe_stored_indices],
+        -jnp.inf,
+    )
+    return group_ids, prior_failure_counts, prior_ever_solved, prior_max_returns
 
 
 def evaluate_returns_rnn(
@@ -657,15 +773,7 @@ def _editor_transfer_score_diagnostics(
     standard_errors: chex.Array,
 ) -> Dict[str, chex.Array]:
     """Summarize score separation and score magnitude relative to target SE."""
-    sorted_scores = jnp.sort(scores)
-    score_q10, score_q50, score_q90 = _linear_quantiles_from_sorted(
-        sorted_scores, (0.1, 0.5, 0.9)
-    )
-    top_score_gap = (
-        sorted_scores[-1] - sorted_scores[-2]
-        if scores.shape[0] > 1
-        else jnp.array(jnp.nan, dtype=scores.dtype)
-    )
+    diagnostics = _editor_transfer_score_distribution_diagnostics(scores)
 
     denominator = jnp.maximum(standard_errors, 1e-8)
     score_se_ratios = jnp.where(
@@ -677,17 +785,239 @@ def _editor_transfer_score_diagnostics(
     abs_ratio_q50, abs_ratio_q90 = _linear_quantiles_from_sorted(
         sorted_abs_ratios, (0.5, 0.9)
     )
+    diagnostics.update(
+        {
+            "transfer_score_se_ratio_mean": score_se_ratios.mean(),
+            "transfer_score_se_abs_ratio_q50": abs_ratio_q50,
+            "transfer_score_se_abs_ratio_q90": abs_ratio_q90,
+            "transfer_score_se_positive_gt_1_fraction": (score_se_ratios > 1).mean(),
+            "transfer_score_se_positive_gt_2_fraction": (score_se_ratios > 2).mean(),
+        }
+    )
+    return diagnostics
+
+
+def _editor_transfer_score_distribution_diagnostics(
+    scores: chex.Array,
+) -> Dict[str, chex.Array]:
+    """Summarize only the distribution of scores actually supplied to PLR."""
+    sorted_scores = jnp.sort(scores)
+    score_q10, score_q50, score_q90 = _linear_quantiles_from_sorted(
+        sorted_scores, (0.1, 0.5, 0.9)
+    )
+    top_score_gap = (
+        sorted_scores[-1] - sorted_scores[-2]
+        if scores.shape[0] > 1
+        else jnp.array(jnp.nan, dtype=scores.dtype)
+    )
     return {
         "transfer_score_q10": score_q10,
         "transfer_score_q50": score_q50,
         "transfer_score_q90": score_q90,
         "transfer_top_score_gap": top_score_gap,
-        "transfer_score_se_ratio_mean": score_se_ratios.mean(),
-        "transfer_score_se_abs_ratio_q50": abs_ratio_q50,
-        "transfer_score_se_abs_ratio_q90": abs_ratio_q90,
-        "transfer_score_se_positive_gt_1_fraction": (score_se_ratios > 1).mean(),
-        "transfer_score_se_positive_gt_2_fraction": (score_se_ratios > 2).mean(),
     }
+
+
+def _empty_solved_informed_transfer_diagnostics() -> Dict[str, chex.Array]:
+    """Return stable NaN diagnostics for editor-transfer control scorers."""
+    return {
+        key: jnp.array(jnp.nan, dtype=jnp.float32)
+        for key in SOLVED_INFORMED_TRANSFER_STAT_METRIC_KEYS
+    }
+
+
+def beta_one_upper_confidence_quantile(
+    beta: chex.Array,
+    confidence: float = DEFAULT_TRANSFER_SOLVED_CONFIDENCE,
+) -> chex.Array:
+    """Return the exact upper quantile of a ``Beta(1, beta)`` posterior.
+
+    Before a level is ever solved, each source rollout is a Bernoulli trial whose
+    success event is any reward greater than zero. The Beta prior is conjugate to
+    those observations, while its upper quantile leaves uncertainty-driven room
+    for levels that have not yet produced a success. Fixing alpha to one makes
+    the inverse CDF analytic; ``log1p`` and ``expm1`` keep it stable when beta is
+    large and the resulting quantile is close to zero.
+    """
+    dtype = jnp.result_type(beta, confidence, jnp.float32)
+    beta = jnp.asarray(beta, dtype=dtype)
+    confidence = jnp.asarray(confidence, dtype=dtype)
+    return -jnp.expm1(jnp.log1p(-confidence) / beta)
+
+
+def compute_solved_informed_transfer_update(
+    group_ids: chex.Array,
+    base_scores: chex.Array,
+    current_solved: chex.Array,
+    prior_failure_counts: chex.Array,
+    prior_ever_solved: chex.Array,
+    current_max_returns: chex.Array,
+    prior_max_returns: chex.Array,
+    prior_beta: float = DEFAULT_TRANSFER_SOLVED_PRIOR_BETA,
+    confidence: float = DEFAULT_TRANSFER_SOLVED_CONFIDENCE,
+    known_ever_solved: Optional[chex.Array] = None,
+) -> SolvedInformedTransferUpdate:
+    """Aggregate one scoring batch and compute ``score = base + log(q)``.
+
+    Failure evidence updates ``Beta(1, prior_beta + failures)`` only
+    until the first observed positive reward. That success permanently latches
+    the level identity to ``q = 1`` and therefore zero log penalty. The external
+    append-only history supplies successes beyond the current PLR residency.
+    """
+    group_ids = jnp.asarray(group_ids)
+    current_solved = jnp.asarray(current_solved, dtype=jnp.bool_)
+    same_group = group_ids[:, None] == group_ids[None, :]
+    multiplicities = same_group.sum(axis=1)
+    aggregate_base_scores = (same_group * base_scores[None, :]).sum(
+        axis=1
+    ) / multiplicities
+    aggregate_current_solved = (same_group & current_solved[None, :]).any(axis=1)
+    aggregate_prior_solved = (same_group & prior_ever_solved[None, :]).any(axis=1)
+    aggregate_prior_failures = jnp.where(
+        same_group,
+        prior_failure_counts[None, :],
+        0,
+    ).max(axis=1)
+    aggregate_prior_max_returns = jnp.where(
+        same_group,
+        prior_max_returns[None, :],
+        -jnp.inf,
+    ).max(axis=1)
+    aggregate_current_max_returns = jnp.where(
+        same_group,
+        current_max_returns[None, :],
+        -jnp.inf,
+    ).max(axis=1)
+
+    if known_ever_solved is None:
+        known_ever_solved = jnp.zeros_like(current_solved)
+    aggregate_known_solved = (same_group & known_ever_solved[None, :]).any(axis=1)
+    ever_solved = (
+        aggregate_prior_solved | aggregate_current_solved | aggregate_known_solved
+    )
+    newly_solved = ~aggregate_prior_solved & ever_solved
+    failure_increments = jnp.where(
+        ever_solved,
+        0,
+        multiplicities,
+    ).astype(jnp.int32)
+    failure_counts = aggregate_prior_failures + failure_increments
+
+    beta = jnp.asarray(prior_beta, dtype=jnp.float32) + failure_counts.astype(
+        jnp.float32
+    )
+    posterior_confidence = beta_one_upper_confidence_quantile(
+        beta=beta,
+        confidence=confidence,
+    )
+    confidences = jnp.where(ever_solved, 1.0, posterior_confidence)
+    penalties = jnp.log(confidences.astype(aggregate_base_scores.dtype))
+    scores = aggregate_base_scores + penalties
+
+    entry_indices = jnp.arange(group_ids.shape[0])
+    first_indices = jnp.where(
+        same_group, entry_indices[None, :], group_ids.shape[0]
+    ).min(axis=1)
+    is_first = entry_indices == first_indices
+    repeated_source_count = (is_first & (multiplicities > 1)).sum(dtype=jnp.int32)
+
+    return SolvedInformedTransferUpdate(
+        scores=scores,
+        base_scores=aggregate_base_scores,
+        failure_counts=failure_counts,
+        ever_solved=ever_solved,
+        confidences=confidences,
+        penalties=penalties,
+        current_solved=current_solved,
+        group_current_solved=aggregate_current_solved,
+        group_representatives=is_first,
+        newly_solved=newly_solved,
+        failure_increments=failure_increments,
+        max_returns=jnp.maximum(
+            aggregate_prior_max_returns, aggregate_current_max_returns
+        ),
+        repeated_source_count=repeated_source_count,
+        max_source_multiplicity=multiplicities.max(),
+    )
+
+
+def solved_informed_transfer_diagnostics(
+    base_diagnostics: Dict[str, chex.Array],
+    update: SolvedInformedTransferUpdate,
+) -> Dict[str, chex.Array]:
+    """Describe the base estimate and the final score without conflating their SE."""
+    diagnostics = dict(base_diagnostics)
+    base_distribution_keys = {
+        "transfer_score_q10": "transfer_base_score_q10",
+        "transfer_score_q50": "transfer_base_score_q50",
+        "transfer_score_q90": "transfer_base_score_q90",
+        "transfer_top_score_gap": "transfer_base_top_score_gap",
+    }
+    base_distribution = _editor_transfer_score_distribution_diagnostics(
+        update.base_scores
+    )
+    for score_key, base_key in base_distribution_keys.items():
+        diagnostics[base_key] = base_distribution[score_key]
+
+    base_se_keys = {
+        "transfer_score_se_ratio_mean": "transfer_base_score_se_ratio_mean",
+        "transfer_score_se_abs_ratio_q50": "transfer_base_score_se_abs_ratio_q50",
+        "transfer_score_se_abs_ratio_q90": "transfer_base_score_se_abs_ratio_q90",
+        "transfer_score_se_positive_gt_1_fraction": (
+            "transfer_base_score_se_positive_gt_1_fraction"
+        ),
+        "transfer_score_se_positive_gt_2_fraction": (
+            "transfer_base_score_se_positive_gt_2_fraction"
+        ),
+    }
+    for score_key, base_key in base_se_keys.items():
+        diagnostics[base_key] = diagnostics[score_key]
+
+    diagnostics.update(_editor_transfer_score_distribution_diagnostics(update.scores))
+    for score_se_key in (
+        "transfer_score_se_ratio_mean",
+        "transfer_score_se_abs_ratio_q50",
+        "transfer_score_se_abs_ratio_q90",
+        "transfer_score_se_positive_gt_1_fraction",
+        "transfer_score_se_positive_gt_2_fraction",
+    ):
+        diagnostics[score_se_key] = jnp.array(jnp.nan, dtype=jnp.float32)
+
+    confidence_q10, confidence_q50, confidence_q90 = _linear_quantiles_from_sorted(
+        jnp.sort(update.confidences), (0.1, 0.5, 0.9)
+    )
+    penalty_q10, penalty_q50, penalty_q90 = _linear_quantiles_from_sorted(
+        jnp.sort(update.penalties), (0.1, 0.5, 0.9)
+    )
+
+    def group_mean(values: chex.Array) -> chex.Array:
+        values = jnp.asarray(values, dtype=jnp.float32)
+        representatives = update.group_representatives
+        return jnp.where(representatives, values, 0).sum() / representatives.sum()
+
+    diagnostics.update(
+        {
+            "transfer_base_score_mean": update.base_scores.mean(),
+            "transfer_solved_confidence_mean": update.confidences.mean(),
+            "transfer_solved_confidence_q10": confidence_q10,
+            "transfer_solved_confidence_q50": confidence_q50,
+            "transfer_solved_confidence_q90": confidence_q90,
+            "transfer_solved_penalty_mean": update.penalties.mean(),
+            "transfer_solved_penalty_q10": penalty_q10,
+            "transfer_solved_penalty_q50": penalty_q50,
+            "transfer_solved_penalty_q90": penalty_q90,
+            "transfer_current_solved_fraction": update.current_solved.mean(),
+            "transfer_current_solved_group_fraction": group_mean(
+                update.group_current_solved
+            ),
+            "transfer_newly_solved_fraction": group_mean(update.newly_solved),
+            "transfer_ever_solved_fraction": group_mean(update.ever_solved),
+            "transfer_failure_increment_mean": group_mean(update.failure_increments),
+            "transfer_repeated_source_count": update.repeated_source_count,
+            "transfer_max_source_multiplicity": update.max_source_multiplicity,
+        }
+    )
+    return diagnostics
 
 
 def compute_log_relative_transfer_gains(
@@ -714,9 +1044,7 @@ def _compute_editor_transfer_scores_from_gains(
     target_count = returns_before.shape[1]
     scores = score_gains.mean(axis=1)
     std_ddof = 1 if target_count > 1 else 0
-    standard_errors = score_gains.std(axis=1, ddof=std_ddof) / jnp.sqrt(
-        target_count
-    )
+    standard_errors = score_gains.std(axis=1, ddof=std_ddof) / jnp.sqrt(target_count)
     diagnostics = {
         "transfer_pre_return_mean": returns_before.mean(),
         "transfer_post_return_mean": returns_after.mean(),
@@ -727,6 +1055,7 @@ def _compute_editor_transfer_scores_from_gains(
         "transfer_standard_error_mean": standard_errors.mean(),
         "transfer_positive_gain_fraction": (raw_gains > 0).mean(),
         **_editor_transfer_score_diagnostics(scores, standard_errors),
+        **_empty_solved_informed_transfer_diagnostics(),
     }
     return scores, diagnostics
 
@@ -786,7 +1115,10 @@ def compute_configured_editor_transfer_scores(
             returns_after=returns_after,
             log_relative_tau=log_relative_tau,
         )
-    if score_function == EDITOR_LOG_RELATIVE_TRANSFER_SCORE_FUNCTION:
+    if score_function in (
+        EDITOR_LOG_RELATIVE_TRANSFER_SCORE_FUNCTION,
+        EDITOR_SOLVED_INFORMED_LOG_RELATIVE_TRANSFER_SCORE_FUNCTION,
+    ):
         return compute_editor_log_relative_transfer_scores(
             returns_before=returns_before,
             returns_after=returns_after,
@@ -1211,6 +1543,40 @@ def compute_plr_bank_score_diagnostics(
     }
 
 
+@jax.jit
+def compute_masked_bank_distribution(
+    values: chex.Array,
+    mask: chex.Array,
+) -> Dict[str, chex.Array]:
+    """Compute masked count, mean, and quantiles over a fixed-capacity bank."""
+    values = values.astype(jnp.float32)
+    mask = mask.astype(jnp.bool_)
+    count = mask.sum(dtype=jnp.int32)
+    sorted_values = jnp.sort(jnp.where(mask, values, jnp.inf))
+    safe_count = jnp.maximum(count, 1)
+    positions = jnp.asarray((0.1, 0.5, 0.9), dtype=values.dtype) * (safe_count - 1)
+    lower_indices = jnp.floor(positions).astype(jnp.int32)
+    upper_indices = jnp.ceil(positions).astype(jnp.int32)
+    weights = positions - lower_indices
+    quantiles = jnp.take(sorted_values, lower_indices) + weights * (
+        jnp.take(sorted_values, upper_indices) - jnp.take(sorted_values, lower_indices)
+    )
+    nan = jnp.array(jnp.nan, dtype=values.dtype)
+    quantiles = jnp.where(count > 0, quantiles, nan)
+    mean = jnp.where(
+        count > 0,
+        jnp.where(mask, values, 0).sum() / safe_count,
+        nan,
+    )
+    return {
+        "count": count,
+        "mean": mean,
+        "q10": quantiles[0],
+        "q50": quantiles[1],
+        "q90": quantiles[2],
+    }
+
+
 def train_state_to_log_dict(
     train_state: TrainState, level_sampler: LevelSampler
 ) -> dict:
@@ -1255,6 +1621,35 @@ def train_state_to_log_dict(
                 sampler["levels_extra"]["transfer_target_duplicate_count"],
                 0,
             ).sum()
+    if "levels_extra" in sampler and "transfer_ever_solved" in sampler["levels_extra"]:
+        solved = sampler["levels_extra"]["transfer_ever_solved"] & idx
+        unsolved = ~sampler["levels_extra"]["transfer_ever_solved"] & idx
+        solved_count = solved.sum(dtype=jnp.int32)
+        log["level_sampler/solved_informed/ever_solved_count"] = solved_count
+        log["level_sampler/solved_informed/ever_solved_fraction"] = (
+            solved_count.astype(jnp.float32) / s
+        )
+        solved_informed_distributions = {
+            "never_solved_confidence": compute_masked_bank_distribution(
+                sampler["levels_extra"]["transfer_solved_confidence"], unsolved
+            ),
+            "never_solved_failure_count": compute_masked_bank_distribution(
+                sampler["levels_extra"]["transfer_unsolved_failure_count"], unsolved
+            ),
+            "base_score": compute_masked_bank_distribution(
+                sampler["levels_extra"]["transfer_base_log_relative_score"], idx
+            ),
+        }
+        for metric_prefix, distribution in solved_informed_distributions.items():
+            for statistic, value in distribution.items():
+                log[f"level_sampler/solved_informed/{metric_prefix}_{statistic}"] = (
+                    value
+                )
+
+    if getattr(train_state, "solved_level_history", None) is not None:
+        log["level_sampler/solved_informed/lifetime_solved_count"] = (
+            train_state.solved_level_history.size
+        )
 
     return {
         "log": log,
@@ -1861,6 +2256,84 @@ def normalize_run_name(name: str) -> str:
     return normalized or "run"
 
 
+@jax.jit
+def _solved_informed_numerical_endpoints(
+    prior_beta: chex.Array,
+    confidence: chex.Array,
+    failure_counts: chex.Array,
+) -> Tuple[chex.Array, chex.Array]:
+    """Probe the scorer's float32 arithmetic on the active JAX backend."""
+    beta = prior_beta + failure_counts.astype(jnp.float32)
+    quantiles = beta_one_upper_confidence_quantile(beta, confidence)
+    return quantiles, jnp.log(quantiles)
+
+
+def validate_solved_informed_numerics(
+    prior_beta: float,
+    confidence: float,
+    max_failure_count: int,
+) -> None:
+    """Reject unsafe float32 inputs without changing or clipping the score.
+
+    For a fresh run, one resident entry can receive at most one failure per
+    source slot per update. Since q decreases with failures, zero and that
+    upper bound probe its largest and smallest values. JIT evaluation also
+    catches backend subnormal flushing that host-only checks would miss.
+    """
+    with np.errstate(over="ignore", under="ignore", invalid="ignore"):
+        beta32 = np.float32(prior_beta)
+        confidence32 = np.float32(confidence)
+    if not np.isfinite(beta32) or beta32 <= 0:
+        raise ValueError(
+            "--transfer_solved_prior_beta must remain positive and finite "
+            "after float32 conversion."
+        )
+    if not np.isfinite(confidence32) or not 0 < confidence32 < 1:
+        raise ValueError(
+            "--transfer_solved_confidence must remain strictly between 0 and 1 "
+            "after float32 conversion."
+        )
+    if not 0 <= max_failure_count <= np.iinfo(np.int32).max:
+        raise ValueError(
+            "num_updates * num_train_envs must fit the non-negative int32 "
+            "solved-informed failure counter."
+        )
+
+    endpoints = (0, max_failure_count)
+    quantiles, penalties = _solved_informed_numerical_endpoints(
+        jnp.asarray(beta32),
+        jnp.asarray(confidence32),
+        jnp.asarray(endpoints, dtype=jnp.int32),
+    )
+    for failures, q, log_q in zip(endpoints, np.asarray(quantiles), np.asarray(penalties)):
+        if not (np.isfinite(q) and 0 < q < 1 and np.isfinite(log_q)):
+            raise ValueError(
+                "Unsafe solved-informed float32 calculation at "
+                f"{failures} failures: q={q}, log(q)={log_q}. "
+                "Choose --transfer_solved_prior_beta and "
+                "--transfer_solved_confidence that keep 0 < q < 1 and "
+                "log(q) finite throughout this run."
+            )
+
+
+def validate_log_relative_tau(tau: float) -> None:
+    """Require smoothing that remains positive and finite in float32.
+
+    Subnormal values are rejected too: accelerator arithmetic may flush them
+    to zero, making zero-return log-relative gains undefined. This is a startup
+    guard, not clipping or a change to the scoring formula.
+    """
+    if not np.isfinite(tau) or tau <= 0:
+        raise ValueError("--transfer_log_relative_tau must be finite and > 0.")
+    with np.errstate(over="ignore", under="ignore", invalid="ignore"):
+        tau32 = np.float32(tau)
+    if not np.isfinite(tau32) or tau32 < np.finfo(np.float32).tiny:
+        raise ValueError(
+            "--transfer_log_relative_tau must remain a positive, finite, normal "
+            "float32 value; underflow, overflow, and subnormal smoothing are unsafe."
+        )
+
+
 def validate_editor_transfer_config(config: Dict[str, Any]) -> None:
     """Validate the static shape and ownership constraints of editor transfer."""
     if config["score_function"] not in EDITOR_TRANSFER_SCORE_FUNCTIONS:
@@ -1869,23 +2342,52 @@ def validate_editor_transfer_config(config: Dict[str, Any]) -> None:
         raise ValueError("--transfer_target_count must be >= 1.")
     if config["transfer_num_edits"] < 1:
         raise ValueError("--transfer_num_edits must be >= 1.")
-    if (
-        config.get(
-            "transfer_log_relative_tau", DEFAULT_TRANSFER_LOG_RELATIVE_TAU
-        )
-        <= 0
-    ):
-        raise ValueError("--transfer_log_relative_tau must be > 0.")
+    transfer_log_relative_tau = config.get(
+        "transfer_log_relative_tau", DEFAULT_TRANSFER_LOG_RELATIVE_TAU
+    )
+    validate_log_relative_tau(transfer_log_relative_tau)
     if config["use_accel"]:
         raise ValueError(
-            f"--score_function {config['score_function']} does not support "
-            "--use_accel."
+            f"--score_function {config['score_function']} does not support --use_accel."
         )
+    if (
+        config["score_function"]
+        != EDITOR_SOLVED_INFORMED_LOG_RELATIVE_TRANSFER_SCORE_FUNCTION
+    ):
+        return
+    solved_prior_alpha = config.get(
+        "transfer_solved_prior_alpha", DEFAULT_TRANSFER_SOLVED_PRIOR_ALPHA
+    )
+    if not np.isfinite(solved_prior_alpha) or solved_prior_alpha != 1.0:
+        raise ValueError("--transfer_solved_prior_alpha must equal 1.")
+    solved_prior_beta = config.get(
+        "transfer_solved_prior_beta", DEFAULT_TRANSFER_SOLVED_PRIOR_BETA
+    )
+    if not np.isfinite(solved_prior_beta) or solved_prior_beta <= 0:
+        raise ValueError("--transfer_solved_prior_beta must be > 0.")
+    solved_confidence = config.get(
+        "transfer_solved_confidence", DEFAULT_TRANSFER_SOLVED_CONFIDENCE
+    )
+    if not np.isfinite(solved_confidence) or not 0 < solved_confidence < 1:
+        raise ValueError("--transfer_solved_confidence must be between 0 and 1.")
+    num_updates = config["num_updates"]
+    num_train_envs = config["num_train_envs"]
+    if num_updates < 0 or num_train_envs < 1:
+        raise ValueError("num_updates must be >= 0 and num_train_envs must be >= 1.")
+    validate_solved_informed_numerics(
+        prior_beta=solved_prior_beta,
+        confidence=solved_confidence,
+        max_failure_count=int(num_updates) * int(num_train_envs),
+    )
 
 
 def main(config=None, project="JAXUED_TEST"):
     validate_editor_transfer_config(config)
     uses_editor_transfer = config["score_function"] in EDITOR_TRANSFER_SCORE_FUNCTIONS
+    uses_solved_informed_transfer = (
+        config["score_function"]
+        == EDITOR_SOLVED_INFORMED_LOG_RELATIVE_TRANSFER_SCORE_FUNCTION
+    )
     tags = []
     if not config["exploratory_grad_updates"]:
         tags.append("robust")
@@ -1992,6 +2494,23 @@ def main(config=None, project="JAXUED_TEST"):
                         * config["num_minibatches"]
                         * config["epoch_ppo"]
                         * (not config["exploratory_grad_updates"])
+                    ),
+                }
+            )
+        if uses_solved_informed_transfer:
+            log_dict.update(
+                {
+                    "transfer/solved_informed/prior_alpha": config.get(
+                        "transfer_solved_prior_alpha",
+                        DEFAULT_TRANSFER_SOLVED_PRIOR_ALPHA,
+                    ),
+                    "transfer/solved_informed/prior_beta": config.get(
+                        "transfer_solved_prior_beta",
+                        DEFAULT_TRANSFER_SOLVED_PRIOR_BETA,
+                    ),
+                    "transfer/solved_informed/confidence_quantile": config.get(
+                        "transfer_solved_confidence",
+                        DEFAULT_TRANSFER_SOLVED_CONFIDENCE,
                     ),
                 }
             )
@@ -2114,8 +2633,23 @@ def main(config=None, project="JAXUED_TEST"):
                 {
                     "transfer_targets": placeholder_target_bank,
                     "has_transfer_targets": jnp.array(False),
-                    "transfer_target_duplicate_count": jnp.array(
-                        0, dtype=jnp.int32
+                    "transfer_target_duplicate_count": jnp.array(0, dtype=jnp.int32),
+                }
+            )
+        if uses_solved_informed_transfer:
+            level_extras.update(
+                {
+                    "transfer_unsolved_failure_count": jnp.array(0, dtype=jnp.int32),
+                    "transfer_ever_solved": jnp.array(False),
+                    "transfer_solved_confidence": jnp.array(
+                        config.get(
+                            "transfer_solved_confidence",
+                            DEFAULT_TRANSFER_SOLVED_CONFIDENCE,
+                        ),
+                        dtype=jnp.float32,
+                    ),
+                    "transfer_base_log_relative_score": jnp.array(
+                        0.0, dtype=jnp.float32
                     ),
                 }
             )
@@ -2136,6 +2670,14 @@ def main(config=None, project="JAXUED_TEST"):
             dr_last_level_batch=pholder_level_batch,
             replay_last_level_batch=pholder_level_batch,
             mutation_last_level_batch=pholder_level_batch,
+            solved_level_history=(
+                create_solved_level_history(
+                    pholder_level,
+                    max_observations=config["num_updates"] * config["num_train_envs"],
+                )
+                if uses_solved_informed_transfer
+                else None
+            ),
         )
 
     def train_step(carry: Tuple[chex.PRNGKey, TrainState], _):
@@ -2178,9 +2720,7 @@ def main(config=None, project="JAXUED_TEST"):
             sampler = train_state.sampler
 
             transfer_metrics = (
-                empty_editor_transfer_metrics()
-                if uses_editor_transfer
-                else {}
+                empty_editor_transfer_metrics() if uses_editor_transfer else {}
             )
 
             # Generate source levels, then resolve their fixed target banks before
@@ -2189,6 +2729,17 @@ def main(config=None, project="JAXUED_TEST"):
             new_levels = jax.vmap(sample_random_level)(
                 jax.random.split(rng_levels, config["num_train_envs"])
             )
+            if uses_solved_informed_transfer:
+                (
+                    solved_group_ids,
+                    prior_failure_counts,
+                    prior_ever_solved,
+                    prior_max_returns,
+                ) = resolve_new_solved_informed_history(
+                    sampler=sampler,
+                    source_levels=new_levels,
+                    duplicate_check=config["buffer_duplicate_check"],
+                )
             if uses_editor_transfer:
                 (
                     rng,
@@ -2248,6 +2799,7 @@ def main(config=None, project="JAXUED_TEST"):
                 dones=dones,
             )
             max_returns = compute_max_returns(dones=dones, rewards=rewards)
+            current_solved = (rewards > 0).any(axis=0)
 
             lp_metrics = {
                 "lp_s_in_mean": jnp.nan,
@@ -2286,9 +2838,7 @@ def main(config=None, project="JAXUED_TEST"):
             # Robust mode keeps it only as the post-update scoring state.
             policy_before_update = train_state
             apply_update = (
-                True
-                if uses_editor_transfer
-                else config["exploratory_grad_updates"]
+                True if uses_editor_transfer else config["exploratory_grad_updates"]
             )
             (rng, updated_train_state), (losses, grad_norms) = update_actor_critic_rnn(
                 rng=rng,
@@ -2331,6 +2881,39 @@ def main(config=None, project="JAXUED_TEST"):
                         DEFAULT_TRANSFER_LOG_RELATIVE_TAU,
                     ),
                 )
+                if uses_solved_informed_transfer:
+                    observed_successes = observe_level_successes(
+                        train_state.solved_level_history, new_levels, current_solved
+                    )
+                    train_state = train_state.replace(
+                        solved_level_history=observed_successes.history
+                    )
+                    solved_informed_update = compute_solved_informed_transfer_update(
+                        group_ids=solved_group_ids,
+                        base_scores=scores,
+                        current_solved=current_solved,
+                        prior_failure_counts=prior_failure_counts,
+                        prior_ever_solved=(
+                            prior_ever_solved | observed_successes.previously_solved
+                        ),
+                        known_ever_solved=observed_successes.ever_solved,
+                        current_max_returns=max_returns,
+                        prior_max_returns=prior_max_returns,
+                        prior_beta=config.get(
+                            "transfer_solved_prior_beta",
+                            DEFAULT_TRANSFER_SOLVED_PRIOR_BETA,
+                        ),
+                        confidence=config.get(
+                            "transfer_solved_confidence",
+                            DEFAULT_TRANSFER_SOLVED_CONFIDENCE,
+                        ),
+                    )
+                    scores = solved_informed_update.scores
+                    max_returns = solved_informed_update.max_returns
+                    transfer_diagnostics = solved_informed_transfer_diagnostics(
+                        base_diagnostics=transfer_diagnostics,
+                        update=solved_informed_update,
+                    )
                 transfer_metrics = {
                     **transfer_diagnostics,
                     "transfer_attached_bank_count": jnp.array(
@@ -2381,6 +2964,21 @@ def main(config=None, project="JAXUED_TEST"):
                         ),
                     }
                 )
+            if uses_solved_informed_transfer:
+                level_extras.update(
+                    {
+                        "transfer_unsolved_failure_count": (
+                            solved_informed_update.failure_counts
+                        ),
+                        "transfer_ever_solved": solved_informed_update.ever_solved,
+                        "transfer_solved_confidence": (
+                            solved_informed_update.confidences
+                        ),
+                        "transfer_base_log_relative_score": (
+                            solved_informed_update.base_scores
+                        ),
+                    }
+                )
             sampler, _ = level_sampler.insert_batch(
                 sampler=sampler,
                 levels=new_levels,
@@ -2426,9 +3024,7 @@ def main(config=None, project="JAXUED_TEST"):
             )
             stored_level_extras = level_sampler.get_levels_extra(sampler, level_inds)
             transfer_metrics = (
-                empty_editor_transfer_metrics()
-                if uses_editor_transfer
-                else {}
+                empty_editor_transfer_metrics() if uses_editor_transfer else {}
             )
             if uses_editor_transfer:
                 target_banks = stored_level_extras["transfer_targets"]
@@ -2475,9 +3071,11 @@ def main(config=None, project="JAXUED_TEST"):
                 rewards,
                 dones,
             )
+            current_max_returns = compute_max_returns(dones, rewards)
+            current_solved = (rewards > 0).any(axis=0)
             max_returns = jnp.maximum(
                 stored_level_extras["max_return"],
-                compute_max_returns(dones, rewards),
+                current_max_returns,
             )
 
             lp_metrics = {
@@ -2550,11 +3148,48 @@ def main(config=None, project="JAXUED_TEST"):
                         DEFAULT_TRANSFER_LOG_RELATIVE_TAU,
                     ),
                 )
-                scores, max_returns = aggregate_replay_transfer_updates(
-                    level_indices=level_inds,
-                    scores=scores,
-                    max_returns=max_returns,
-                )
+                if uses_solved_informed_transfer:
+                    observed_successes = observe_level_successes(
+                        train_state.solved_level_history, levels, current_solved
+                    )
+                    train_state = train_state.replace(
+                        solved_level_history=observed_successes.history
+                    )
+                    solved_informed_update = compute_solved_informed_transfer_update(
+                        group_ids=level_inds,
+                        base_scores=scores,
+                        current_solved=current_solved,
+                        prior_failure_counts=stored_level_extras[
+                            "transfer_unsolved_failure_count"
+                        ],
+                        prior_ever_solved=(
+                            stored_level_extras["transfer_ever_solved"]
+                            | observed_successes.previously_solved
+                        ),
+                        known_ever_solved=observed_successes.ever_solved,
+                        current_max_returns=current_max_returns,
+                        prior_max_returns=stored_level_extras["max_return"],
+                        prior_beta=config.get(
+                            "transfer_solved_prior_beta",
+                            DEFAULT_TRANSFER_SOLVED_PRIOR_BETA,
+                        ),
+                        confidence=config.get(
+                            "transfer_solved_confidence",
+                            DEFAULT_TRANSFER_SOLVED_CONFIDENCE,
+                        ),
+                    )
+                    scores = solved_informed_update.scores
+                    max_returns = solved_informed_update.max_returns
+                    transfer_diagnostics = solved_informed_transfer_diagnostics(
+                        base_diagnostics=transfer_diagnostics,
+                        update=solved_informed_update,
+                    )
+                else:
+                    scores, max_returns = aggregate_replay_transfer_updates(
+                        level_indices=level_inds,
+                        scores=scores,
+                        max_returns=max_returns,
+                    )
                 transfer_metrics = {
                     **transfer_diagnostics,
                     "transfer_attached_bank_count": jnp.array(
@@ -2592,6 +3227,21 @@ def main(config=None, project="JAXUED_TEST"):
                         ),
                         "transfer_target_duplicate_count": (
                             target_bank_duplicate_counts
+                        ),
+                    }
+                )
+            if uses_solved_informed_transfer:
+                level_extras.update(
+                    {
+                        "transfer_unsolved_failure_count": (
+                            solved_informed_update.failure_counts
+                        ),
+                        "transfer_ever_solved": solved_informed_update.ever_solved,
+                        "transfer_solved_confidence": (
+                            solved_informed_update.confidences
+                        ),
+                        "transfer_base_log_relative_score": (
+                            solved_informed_update.base_scores
                         ),
                     }
                 )
@@ -2634,9 +3284,7 @@ def main(config=None, project="JAXUED_TEST"):
             """
             sampler = train_state.sampler
             transfer_metrics = (
-                empty_editor_transfer_metrics()
-                if uses_editor_transfer
-                else {}
+                empty_editor_transfer_metrics() if uses_editor_transfer else {}
             )
             rng, rng_mutate, rng_reset = jax.random.split(rng, 3)
 
@@ -2989,6 +3637,8 @@ def main(config=None, project="JAXUED_TEST"):
     for eval_step in range(config["num_updates"] // config["eval_freq"]):
         start_time = time.time()
         runner_state, metrics = train_and_eval_step(runner_state, None)
+        if uses_solved_informed_transfer:
+            check_solved_history_capacity(runner_state[1].solved_level_history)
         curr_time = time.time()
         metrics["time_delta"] = curr_time - start_time
         log_eval(metrics, train_state_to_log_dict(runner_state[1], level_sampler))
@@ -3061,6 +3711,7 @@ if __name__ == "__main__":
             "s_in",
             EDITOR_TRANSFER_SCORE_FUNCTION,
             EDITOR_LOG_RELATIVE_TRANSFER_SCORE_FUNCTION,
+            EDITOR_SOLVED_INFORMED_LOG_RELATIVE_TRANSFER_SCORE_FUNCTION,
         ],
         help="Score function for level prioritization. "
         "abs_pg uses policy gradient magnitudes. "
@@ -3068,7 +3719,10 @@ if __name__ == "__main__":
         "s_in uses holdout PPO total-loss reduction after virtual updates. "
         "editor_transfer uses paired absolute before/after return gains. "
         "editor_log_relative_transfer uses paired smoothed log-relative gains. "
-        "Both use fixed edited target banks.",
+        "editor_solved_informed_log_relative_transfer adds log(q), where q is "
+        "one after a positive reward and otherwise a Beta upper quantile. "
+        "All editor-transfer scorers use "
+        "fixed edited target banks.",
     )
     group.add_argument(
         "--transfer_target_count",
@@ -3087,6 +3741,24 @@ if __name__ == "__main__":
         type=float,
         default=DEFAULT_TRANSFER_LOG_RELATIVE_TAU,
         help="Positive additive smoothing used by the log-relative transfer score.",
+    )
+    group.add_argument(
+        "--transfer_solved_prior_alpha",
+        type=float,
+        default=DEFAULT_TRANSFER_SOLVED_PRIOR_ALPHA,
+        help="Fixed alpha parameter of the never-solved Beta prior; must equal 1.",
+    )
+    group.add_argument(
+        "--transfer_solved_prior_beta",
+        type=float,
+        default=DEFAULT_TRANSFER_SOLVED_PRIOR_BETA,
+        help="Positive beta parameter of the never-solved Beta prior.",
+    )
+    group.add_argument(
+        "--transfer_solved_confidence",
+        type=float,
+        default=DEFAULT_TRANSFER_SOLVED_CONFIDENCE,
+        help="Posterior quantile used as optimistic rollout-success confidence.",
     )
     group.add_argument(
         "--sin_n_virtual_updates",
@@ -3164,14 +3836,14 @@ if __name__ == "__main__":
         and config["sin_num_rollouts_per_level"] is None
     ):
         parser.error("--sin_num_rollouts_per_level is required for --score_function s_in.")  # fmt: skip
-    try:
-        validate_editor_transfer_config(config)
-    except ValueError as error:
-        parser.error(str(error))
     if config["num_env_steps"] is not None:
         config["num_updates"] = config["num_env_steps"] // (
             config["num_train_envs"] * config["num_steps"]
         )
+    try:
+        validate_editor_transfer_config(config)
+    except ValueError as error:
+        parser.error(str(error))
     config["group_name"] = "".join(
         [
             str(config[key])

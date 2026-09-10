@@ -14,10 +14,15 @@ sys.path.insert(0, str(LAUNCHER_DIRECTORY))
 from _common import (  # noqa: E402
     DEFAULT_EDITOR_TRANSFER_GPU,
     DEFAULT_TRANSFER_LOG_RELATIVE_TAU,
+    DEFAULT_TRANSFER_SOLVED_CONFIDENCE,
+    DEFAULT_TRANSFER_SOLVED_PRIOR_ALPHA,
+    DEFAULT_TRANSFER_SOLVED_PRIOR_BETA,
     EditorLogRelativeTransferRun,
+    EditorSolvedInformedLogRelativeTransferRun,
     EditorTransferRun,
     MazeRun,
     build_editor_log_relative_transfer_command,
+    build_editor_solved_informed_log_relative_transfer_command,
     build_editor_transfer_command,
     build_robust_plr_command,
     resolve_editor_transfer_gpu,
@@ -29,6 +34,10 @@ from editor_transfer_three_seeds import (  # noqa: E402
 from editor_log_relative_transfer_three_seeds import (  # noqa: E402
     DEFAULT_SEEDS as LOG_RELATIVE_DEFAULT_SEEDS,
     parse_seeds as parse_log_relative_seeds,
+)
+from editor_solved_informed_log_relative_transfer_three_seeds import (  # noqa: E402
+    DEFAULT_SEEDS as SOLVED_INFORMED_DEFAULT_SEEDS,
+    parse_seeds as parse_solved_informed_seeds,
 )
 
 
@@ -89,8 +98,9 @@ def test_editor_transfer_matches_robust_plr_shared_modal_config() -> None:
         "--checkpoint_save_interval",
     )
     for option in value_options:
-        assert transfer_command[transfer_command.index(option) + 1] == (
-            robust_command[robust_command.index(option) + 1]
+        assert (
+            transfer_command[transfer_command.index(option) + 1]
+            == (robust_command[robust_command.index(option) + 1])
         )
 
     assert "--no-exploratory_grad_updates" in robust_command
@@ -139,6 +149,54 @@ def test_log_relative_transfer_has_distinct_score_name_and_tau() -> None:
     assert command[command.index("--transfer_log_relative_tau") + 1] == "0.25"
 
 
+def test_solved_informed_transfer_has_distinct_score_and_exact_defaults() -> None:
+    run = EditorSolvedInformedLogRelativeTransferRun(run_name="solved_informed")
+    command = build_editor_solved_informed_log_relative_transfer_command(
+        run,
+        python_executable="python",
+    )
+
+    assert command == (
+        "python",
+        "examples/maze_plr.py",
+        "--project",
+        "JAXUED_TEST",
+        "--run_name",
+        "solved_informed",
+        "--seed",
+        "0",
+        "--num_updates",
+        "30000",
+        "--score_function",
+        "editor_solved_informed_log_relative_transfer",
+        "--transfer_target_count",
+        "128",
+        "--transfer_num_edits",
+        "16",
+        "--transfer_log_relative_tau",
+        "0.1",
+        "--transfer_solved_prior_alpha",
+        "1.0",
+        "--transfer_solved_prior_beta",
+        "1.0",
+        "--transfer_solved_confidence",
+        "0.8",
+        "--no-exploratory_grad_updates",
+        "--no-use_accel",
+        "--checkpoint_save_interval",
+        "10",
+    )
+    assert run.transfer_solved_prior_alpha == pytest.approx(
+        DEFAULT_TRANSFER_SOLVED_PRIOR_ALPHA
+    )
+    assert run.transfer_solved_prior_beta == pytest.approx(
+        DEFAULT_TRANSFER_SOLVED_PRIOR_BETA
+    )
+    assert run.transfer_solved_confidence == pytest.approx(
+        DEFAULT_TRANSFER_SOLVED_CONFIDENCE
+    )
+
+
 def _command_without_option(command: tuple[str, ...], option: str) -> tuple[str, ...]:
     option_index = command.index(option)
     return command[:option_index] + command[option_index + 2 :]
@@ -162,11 +220,12 @@ def test_log_relative_sweep_controls_match_absolute_transfer() -> None:
     relative_score_index = relative_without_tau.index("--score_function") + 1
 
     assert absolute_score_index == relative_score_index
-    assert absolute[:absolute_score_index] == (
-        relative_without_tau[:relative_score_index]
+    assert (
+        absolute[:absolute_score_index] == (relative_without_tau[:relative_score_index])
     )
-    assert absolute[absolute_score_index + 1 :] == (
-        relative_without_tau[relative_score_index + 1 :]
+    assert (
+        absolute[absolute_score_index + 1 :]
+        == (relative_without_tau[relative_score_index + 1 :])
     )
 
 
@@ -175,6 +234,8 @@ def test_editor_transfer_sweep_defaults_to_three_distinct_seeds() -> None:
     assert parse_seeds(",".join(map(str, DEFAULT_SEEDS))) == DEFAULT_SEEDS
     assert LOG_RELATIVE_DEFAULT_SEEDS == DEFAULT_SEEDS
     assert parse_log_relative_seeds("0,1,2") == DEFAULT_SEEDS
+    assert SOLVED_INFORMED_DEFAULT_SEEDS == DEFAULT_SEEDS
+    assert parse_solved_informed_seeds("0,1,2") == DEFAULT_SEEDS
 
 
 @pytest.mark.parametrize(
@@ -211,4 +272,29 @@ def test_log_relative_transfer_run_requires_positive_tau() -> None:
         EditorLogRelativeTransferRun(
             run_name="invalid",
             transfer_log_relative_tau=0,
+        )
+
+
+@pytest.mark.parametrize(
+    ("field", "value", "message"),
+    (
+        ("transfer_solved_prior_alpha", 0, "must equal 1"),
+        ("transfer_solved_prior_alpha", 2, "must equal 1"),
+        ("transfer_solved_prior_alpha", float("nan"), "must equal 1"),
+        ("transfer_solved_prior_beta", 0, "must be positive"),
+        ("transfer_solved_prior_beta", float("inf"), "must be positive"),
+        ("transfer_solved_confidence", 0, "between 0 and 1"),
+        ("transfer_solved_confidence", 1, "between 0 and 1"),
+        ("transfer_solved_confidence", float("nan"), "between 0 and 1"),
+    ),
+)
+def test_solved_informed_transfer_rejects_invalid_controls(
+    field: str,
+    value: float,
+    message: str,
+) -> None:
+    with pytest.raises(ValueError, match=message):
+        EditorSolvedInformedLogRelativeTransferRun(
+            run_name="invalid",
+            **{field: value},
         )

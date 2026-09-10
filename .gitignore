@@ -162,5 +162,11 @@ cython_debug/
 wandb
 checkpoints
 results
+runpod-runs/
+.playwright-cli/
+output/playwright/
+analysis/plr_priority_report/site/
+analysis/plr_priority_report/site.tar.gz
+analysis/plr_priority_report/social-preview.png
 .pdf
 .pdf

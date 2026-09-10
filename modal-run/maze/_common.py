@@ -7,6 +7,7 @@ import subprocess
 import sys
 from collections.abc import Mapping
 from dataclasses import dataclass
+from math import isfinite
 from pathlib import Path
 
 import modal
@@ -20,6 +21,9 @@ DEFAULT_EDITOR_TRANSFER_GPU = "L40S"
 DEFAULT_TRANSFER_TARGET_COUNT = 128
 DEFAULT_TRANSFER_NUM_EDITS = 16
 DEFAULT_TRANSFER_LOG_RELATIVE_TAU = 0.1
+DEFAULT_TRANSFER_SOLVED_PRIOR_ALPHA = 1.0
+DEFAULT_TRANSFER_SOLVED_PRIOR_BETA = 1.0
+DEFAULT_TRANSFER_SOLVED_CONFIDENCE = 0.8
 WANDB_SECRET_NAME = os.environ.get("JAXUED_WANDB_SECRET", "wandb-secret")
 CHECKPOINT_VOLUME_NAME = os.environ.get(
     "JAXUED_CHECKPOINT_VOLUME",
@@ -82,8 +86,37 @@ class EditorLogRelativeTransferRun(EditorTransferRun):
 
     def __post_init__(self) -> None:
         super().__post_init__()
-        if self.transfer_log_relative_tau <= 0:
+        if (
+            not isfinite(self.transfer_log_relative_tau)
+            or self.transfer_log_relative_tau <= 0
+        ):
             raise ValueError("transfer_log_relative_tau must be positive")
+
+
+@dataclass(frozen=True)
+class EditorSolvedInformedLogRelativeTransferRun(EditorLogRelativeTransferRun):
+    """Configuration for solved-informed log-relative transfer scoring."""
+
+    transfer_solved_prior_alpha: float = DEFAULT_TRANSFER_SOLVED_PRIOR_ALPHA
+    transfer_solved_prior_beta: float = DEFAULT_TRANSFER_SOLVED_PRIOR_BETA
+    transfer_solved_confidence: float = DEFAULT_TRANSFER_SOLVED_CONFIDENCE
+
+    def __post_init__(self) -> None:
+        super().__post_init__()
+        if (
+            not isfinite(self.transfer_solved_prior_alpha)
+            or self.transfer_solved_prior_alpha != 1.0
+        ):
+            raise ValueError("transfer_solved_prior_alpha must equal 1")
+        if (
+            not isfinite(self.transfer_solved_prior_beta)
+            or self.transfer_solved_prior_beta <= 0
+        ):
+            raise ValueError("transfer_solved_prior_beta must be positive")
+        if not isfinite(self.transfer_solved_confidence) or not (
+            0 < self.transfer_solved_confidence < 1
+        ):
+            raise ValueError("transfer_solved_confidence must be between 0 and 1")
 
 
 def parse_three_seeds(raw_seeds: str) -> tuple[int, int, int]:
@@ -160,22 +193,27 @@ def _build_editor_transfer_command(
         if run.exploratory_grad_updates
         else "--no-exploratory_grad_updates"
     )
-    return _base_command(
-        "examples/maze_plr.py",
-        run,
-        python_executable=python_executable,
-    ) + (
-        "--score_function",
-        score_function,
-        "--transfer_target_count",
-        str(run.transfer_target_count),
-        "--transfer_num_edits",
-        str(run.transfer_num_edits),
-    ) + score_options + (
-        exploratory_flag,
-        "--no-use_accel",
-        "--checkpoint_save_interval",
-        str(run.checkpoint_save_interval),
+    return (
+        _base_command(
+            "examples/maze_plr.py",
+            run,
+            python_executable=python_executable,
+        )
+        + (
+            "--score_function",
+            score_function,
+            "--transfer_target_count",
+            str(run.transfer_target_count),
+            "--transfer_num_edits",
+            str(run.transfer_num_edits),
+        )
+        + score_options
+        + (
+            exploratory_flag,
+            "--no-use_accel",
+            "--checkpoint_save_interval",
+            str(run.checkpoint_save_interval),
+        )
     )
 
 
@@ -209,6 +247,29 @@ def build_editor_log_relative_transfer_command(
     )
 
 
+def build_editor_solved_informed_log_relative_transfer_command(
+    run: EditorSolvedInformedLogRelativeTransferRun,
+    *,
+    python_executable: str = sys.executable,
+) -> tuple[str, ...]:
+    """Build the separately named solved-informed log-relative command."""
+    return _build_editor_transfer_command(
+        run,
+        "editor_solved_informed_log_relative_transfer",
+        (
+            "--transfer_log_relative_tau",
+            str(run.transfer_log_relative_tau),
+            "--transfer_solved_prior_alpha",
+            str(run.transfer_solved_prior_alpha),
+            "--transfer_solved_prior_beta",
+            str(run.transfer_solved_prior_beta),
+            "--transfer_solved_confidence",
+            str(run.transfer_solved_confidence),
+        ),
+        python_executable=python_executable,
+    )
+
+
 image = (
     modal.Image.debian_slim(python_version="3.11")
     .apt_install("ffmpeg")
@@ -228,8 +289,7 @@ image = (
         ],
     )
     .run_commands(
-        "uv pip install --system --compile-bytecode "
-        "-e /root/jaxued 'jax[cuda12]'"
+        "uv pip install --system --compile-bytecode -e /root/jaxued 'jax[cuda12]'"
     )
     .env(
         {

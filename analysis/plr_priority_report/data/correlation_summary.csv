@@ -1,0 +1,295 @@
+run_id,algorithm,seed,metric,outcome,n_points,spearman_rho,p_value
+21u89psq,Mean absolute advantage,1,exact_unique_ratio,contemporaneous,150,0.10312984454875676,0.20916572399435435
+21u89psq,Mean absolute advantage,1,exact_unique_ratio,lead_1000,145,0.03965697247867678,0.6357948246048459
+21u89psq,Mean absolute advantage,1,dominant_share,contemporaneous,150,-0.1126432564214165,0.16993157146817864
+21u89psq,Mean absolute advantage,1,dominant_share,lead_1000,145,-0.030788873923207994,0.713152517278399
+21u89psq,Mean absolute advantage,1,simpson_effective_size,contemporaneous,150,0.1082399319494924,0.18735293452315416
+21u89psq,Mean absolute advantage,1,simpson_effective_size,lead_1000,145,0.024858705987221116,0.7666241413898681
+21u89psq,Mean absolute advantage,1,mean_pairwise_wall_distance_d4,contemporaneous,30,0.2196686886453767,0.2434671339723982
+21u89psq,Mean absolute advantage,1,mean_pairwise_wall_distance_d4,lead_1000,29,-0.02348594640199203,0.9037474377573824
+21u89psq,Mean absolute advantage,1,mean_shortest_path,contemporaneous,30,0.16800719354418608,0.37484006598537994
+21u89psq,Mean absolute advantage,1,mean_shortest_path,lead_1000,29,0.27812304949727396,0.14405405405116975
+21u89psq,Mean absolute advantage,1,mean_solvable,contemporaneous,30,-0.3485796558861343,0.05905016198461692
+21u89psq,Mean absolute advantage,1,mean_solvable,lead_1000,29,-0.3020204304511349,0.11131096845483975
+21u89psq,Mean absolute advantage,1,score_priority_lift_q80_normalized,contemporaneous,0,,
+21u89psq,Mean absolute advantage,1,score_priority_lift_q80_normalized,lead_1000,0,,
+35m9w32x,MaxMC,2,exact_unique_ratio,contemporaneous,150,0.1296933866084392,0.11369212699045926
+35m9w32x,MaxMC,2,exact_unique_ratio,lead_1000,145,0.07313624498782556,0.38199508135967475
+35m9w32x,MaxMC,2,dominant_share,contemporaneous,150,-0.09657610583678784,0.23972817411940722
+35m9w32x,MaxMC,2,dominant_share,lead_1000,145,-0.046530398941495014,0.5783804635621786
+35m9w32x,MaxMC,2,simpson_effective_size,contemporaneous,150,0.11197435445795002,0.1724976666429594
+35m9w32x,MaxMC,2,simpson_effective_size,lead_1000,145,0.053157846340088695,0.5254191028402196
+35m9w32x,MaxMC,2,mean_pairwise_wall_distance_d4,contemporaneous,30,-0.07393389749543262,0.6978105329915454
+35m9w32x,MaxMC,2,mean_pairwise_wall_distance_d4,lead_1000,29,0.03944775093842055,0.8390044211671694
+35m9w32x,MaxMC,2,mean_shortest_path,contemporaneous,30,-0.10369795142616799,0.5855357817708383
+35m9w32x,MaxMC,2,mean_shortest_path,lead_1000,29,-0.11431744681465407,0.5548688488716927
+35m9w32x,MaxMC,2,mean_solvable,contemporaneous,30,,
+35m9w32x,MaxMC,2,mean_solvable,lead_1000,29,,
+35m9w32x,MaxMC,2,score_priority_lift_q80_normalized,contemporaneous,0,,
+35m9w32x,MaxMC,2,score_priority_lift_q80_normalized,lead_1000,0,,
+5rw5cra3,MaxMC,5,exact_unique_ratio,contemporaneous,150,-0.009248148966605961,0.9105688085828542
+5rw5cra3,MaxMC,5,exact_unique_ratio,lead_1000,145,-0.0515404454225192,0.5381143533312936
+5rw5cra3,MaxMC,5,dominant_share,contemporaneous,150,-0.06759117621537623,0.41117093754746514
+5rw5cra3,MaxMC,5,dominant_share,lead_1000,145,-0.003555463414494213,0.9661455281456718
+5rw5cra3,MaxMC,5,simpson_effective_size,contemporaneous,150,0.051065643414538966,0.534864823574462
+5rw5cra3,MaxMC,5,simpson_effective_size,lead_1000,145,-0.0087486549714676,0.9168218009567217
+5rw5cra3,MaxMC,5,mean_pairwise_wall_distance_d4,contemporaneous,30,0.12067241780238853,0.5253024992709606
+5rw5cra3,MaxMC,5,mean_pairwise_wall_distance_d4,lead_1000,29,-0.12592411583591925,0.5151161020528645
+5rw5cra3,MaxMC,5,mean_shortest_path,contemporaneous,30,0.3138499920906225,0.09122668647073648
+5rw5cra3,MaxMC,5,mean_shortest_path,lead_1000,29,0.03672212204109297,0.8499991690274717
+5rw5cra3,MaxMC,5,mean_solvable,contemporaneous,30,,
+5rw5cra3,MaxMC,5,mean_solvable,lead_1000,29,,
+5rw5cra3,MaxMC,5,score_priority_lift_q80_normalized,contemporaneous,149,0.13137979850218998,0.11023907037569455
+5rw5cra3,MaxMC,5,score_priority_lift_q80_normalized,lead_1000,144,0.06013298708465104,0.4740190837530602
+6865l4e4,Log-relative transfer,2,exact_unique_ratio,contemporaneous,150,0.129724873654067,0.11360370972883113
+6865l4e4,Log-relative transfer,2,exact_unique_ratio,lead_1000,145,0.11244845035667106,0.1781044922170534
+6865l4e4,Log-relative transfer,2,dominant_share,contemporaneous,150,-0.07420941621526143,0.36678172559828737
+6865l4e4,Log-relative transfer,2,dominant_share,lead_1000,145,-0.09077440896476717,0.27754467383492093
+6865l4e4,Log-relative transfer,2,simpson_effective_size,contemporaneous,150,0.0906067981790826,0.2701623400517834
+6865l4e4,Log-relative transfer,2,simpson_effective_size,lead_1000,145,0.09663936186606356,0.2475466590535095
+6865l4e4,Log-relative transfer,2,mean_pairwise_wall_distance_d4,contemporaneous,30,0.056977526232539384,0.7648934804700606
+6865l4e4,Log-relative transfer,2,mean_pairwise_wall_distance_d4,lead_1000,29,-0.024642684116618248,0.8990301615936559
+6865l4e4,Log-relative transfer,2,mean_shortest_path,contemporaneous,30,0.41858655644325965,0.02132782529164214
+6865l4e4,Log-relative transfer,2,mean_shortest_path,lead_1000,29,0.2619839981857841,0.169787350858527
+6865l4e4,Log-relative transfer,2,mean_solvable,contemporaneous,30,,
+6865l4e4,Log-relative transfer,2,mean_solvable,lead_1000,29,,
+6865l4e4,Log-relative transfer,2,score_priority_lift_q80_normalized,contemporaneous,148,0.29141093330286444,0.0003263640204947238
+6865l4e4,Log-relative transfer,2,score_priority_lift_q80_normalized,lead_1000,143,0.14847972282513516,0.07676056439138679
+72fdx4sj,Log-relative transfer,1,exact_unique_ratio,contemporaneous,150,0.05347345424242343,0.5157568542067773
+72fdx4sj,Log-relative transfer,1,exact_unique_ratio,lead_1000,145,-0.09898550971178101,0.23619993913909132
+72fdx4sj,Log-relative transfer,1,dominant_share,contemporaneous,150,-0.04979229033277413,0.5451108672240571
+72fdx4sj,Log-relative transfer,1,dominant_share,lead_1000,145,0.1106891048144996,0.185033909614323
+72fdx4sj,Log-relative transfer,1,simpson_effective_size,contemporaneous,150,0.04820343495530361,0.5580293749636516
+72fdx4sj,Log-relative transfer,1,simpson_effective_size,lead_1000,145,-0.11995390646461053,0.15068130564418963
+72fdx4sj,Log-relative transfer,1,mean_pairwise_wall_distance_d4,contemporaneous,30,0.11197898694204486,0.5557737453408238
+72fdx4sj,Log-relative transfer,1,mean_pairwise_wall_distance_d4,lead_1000,29,0.009387393026138339,0.9614533027987188
+72fdx4sj,Log-relative transfer,1,mean_shortest_path,contemporaneous,30,-0.19721202660114825,0.2962174391970879
+72fdx4sj,Log-relative transfer,1,mean_shortest_path,lead_1000,29,-0.01852774939369409,0.9240017846240784
+72fdx4sj,Log-relative transfer,1,mean_solvable,contemporaneous,30,-0.05148619202804393,0.7870080018266097
+72fdx4sj,Log-relative transfer,1,mean_solvable,lead_1000,29,0.020360215747911834,0.9165100339093138
+72fdx4sj,Log-relative transfer,1,score_priority_lift_q80_normalized,contemporaneous,148,0.23715698349473194,0.0037055469834709103
+72fdx4sj,Log-relative transfer,1,score_priority_lift_q80_normalized,lead_1000,143,0.040529666551339265,0.6307950112737116
+73i14emu,Mean absolute advantage,2,exact_unique_ratio,contemporaneous,148,-0.15829542190438273,0.05466216110942254
+73i14emu,Mean absolute advantage,2,exact_unique_ratio,lead_1000,143,-0.054706095678074836,0.516380783947635
+73i14emu,Mean absolute advantage,2,dominant_share,contemporaneous,148,0.12954151445307074,0.11660189533522033
+73i14emu,Mean absolute advantage,2,dominant_share,lead_1000,143,0.08152254687086333,0.33308229878845386
+73i14emu,Mean absolute advantage,2,simpson_effective_size,contemporaneous,148,-0.1391832398530044,0.09158369654700842
+73i14emu,Mean absolute advantage,2,simpson_effective_size,lead_1000,143,-0.07796884677184768,0.3546545506284998
+73i14emu,Mean absolute advantage,2,mean_pairwise_wall_distance_d4,contemporaneous,29,-0.2487665263066195,0.19315897764734954
+73i14emu,Mean absolute advantage,2,mean_pairwise_wall_distance_d4,lead_1000,28,0.005484722968059612,0.9779019325402346
+73i14emu,Mean absolute advantage,2,mean_shortest_path,contemporaneous,29,0.1764781500900955,0.3597841425800347
+73i14emu,Mean absolute advantage,2,mean_shortest_path,lead_1000,28,0.08831612546839841,0.6549518460245197
+73i14emu,Mean absolute advantage,2,mean_solvable,contemporaneous,29,-0.13005082116960667,0.5013269438208768
+73i14emu,Mean absolute advantage,2,mean_solvable,lead_1000,28,0.2743273273121415,0.1577460308980795
+73i14emu,Mean absolute advantage,2,score_priority_lift_q80_normalized,contemporaneous,0,,
+73i14emu,Mean absolute advantage,2,score_priority_lift_q80_normalized,lead_1000,0,,
+7m4pqx91,MaxMC,1,exact_unique_ratio,contemporaneous,150,-0.006840516952734364,0.9337887230321239
+7m4pqx91,MaxMC,1,exact_unique_ratio,lead_1000,145,0.030867406956384236,0.7124530151813205
+7m4pqx91,MaxMC,1,dominant_share,contemporaneous,150,-0.05694922257712563,0.4888054676171648
+7m4pqx91,MaxMC,1,dominant_share,lead_1000,145,-0.04308415165847905,0.6068670606284915
+7m4pqx91,MaxMC,1,simpson_effective_size,contemporaneous,150,0.04726531664626245,0.5657255029954946
+7m4pqx91,MaxMC,1,simpson_effective_size,lead_1000,145,0.04025114506320126,0.6307383744248087
+7m4pqx91,MaxMC,1,mean_pairwise_wall_distance_d4,contemporaneous,30,0.29190055432163065,0.11754111486270645
+7m4pqx91,MaxMC,1,mean_pairwise_wall_distance_d4,lead_1000,29,0.434752973400978,0.018432641549453
+7m4pqx91,MaxMC,1,mean_shortest_path,contemporaneous,30,0.07433067008902884,0.6962650255013592
+7m4pqx91,MaxMC,1,mean_shortest_path,lead_1000,29,-0.04511766193073766,0.8162298788438097
+7m4pqx91,MaxMC,1,mean_solvable,contemporaneous,30,,
+7m4pqx91,MaxMC,1,mean_solvable,lead_1000,29,,
+7m4pqx91,MaxMC,1,score_priority_lift_q80_normalized,contemporaneous,0,,
+7m4pqx91,MaxMC,1,score_priority_lift_q80_normalized,lead_1000,0,,
+7vdx47w2,Editor transfer,1,exact_unique_ratio,contemporaneous,150,0.10631470934327875,0.19536698339233155
+7vdx47w2,Editor transfer,1,exact_unique_ratio,lead_1000,145,-0.024532348442251335,0.7696017233006648
+7vdx47w2,Editor transfer,1,dominant_share,contemporaneous,150,-0.09031204881502236,0.2717301600587978
+7vdx47w2,Editor transfer,1,dominant_share,lead_1000,145,0.09769583160646052,0.2423913509133788
+7vdx47w2,Editor transfer,1,simpson_effective_size,contemporaneous,150,0.10127148986079611,0.2175330543794544
+7vdx47w2,Editor transfer,1,simpson_effective_size,lead_1000,145,-0.08314104640092801,0.32012147982795025
+7vdx47w2,Editor transfer,1,mean_pairwise_wall_distance_d4,contemporaneous,30,0.15050731665884062,0.4272700971536884
+7vdx47w2,Editor transfer,1,mean_pairwise_wall_distance_d4,lead_1000,29,0.00792581966593706,0.9674514130824906
+7vdx47w2,Editor transfer,1,mean_shortest_path,contemporaneous,30,0.06218605474881146,0.7440837090031988
+7vdx47w2,Editor transfer,1,mean_shortest_path,lead_1000,29,-0.15737491958849786,0.4148948225184853
+7vdx47w2,Editor transfer,1,mean_solvable,contemporaneous,30,0.11883322399937092,0.5316809794207819
+7vdx47w2,Editor transfer,1,mean_solvable,lead_1000,29,-0.025927284040999136,0.8937953995899912
+7vdx47w2,Editor transfer,1,score_priority_lift_q80_normalized,contemporaneous,148,0.01917126172470437,0.8171033519391963
+7vdx47w2,Editor transfer,1,score_priority_lift_q80_normalized,lead_1000,143,0.17787524679539177,0.0335541318260339
+93e6u91i,Log-relative transfer,3,exact_unique_ratio,contemporaneous,150,-0.14979510361136783,0.06731012558661888
+93e6u91i,Log-relative transfer,3,exact_unique_ratio,lead_1000,145,-0.09224535098045453,0.26980057518184103
+93e6u91i,Log-relative transfer,3,dominant_share,contemporaneous,150,0.10254959412969256,0.2117531693156974
+93e6u91i,Log-relative transfer,3,dominant_share,lead_1000,145,0.05547671375403954,0.5074862453481318
+93e6u91i,Log-relative transfer,3,simpson_effective_size,contemporaneous,150,-0.11327177453000178,0.16754631244451285
+93e6u91i,Log-relative transfer,3,simpson_effective_size,lead_1000,145,-0.06590768748479801,0.43091809590876506
+93e6u91i,Log-relative transfer,3,mean_pairwise_wall_distance_d4,contemporaneous,30,-0.1880362894035898,0.31970358366229285
+93e6u91i,Log-relative transfer,3,mean_pairwise_wall_distance_d4,lead_1000,29,0.003947211193063836,0.9837869849192502
+93e6u91i,Log-relative transfer,3,mean_shortest_path,contemporaneous,30,0.323306884288312,0.0813808015894885
+93e6u91i,Log-relative transfer,3,mean_shortest_path,lead_1000,29,-0.01566742402701505,0.93570826096844
+93e6u91i,Log-relative transfer,3,mean_solvable,contemporaneous,30,0.0966836892690224,0.6112780165075516
+93e6u91i,Log-relative transfer,3,mean_solvable,lead_1000,29,0.0904957888744945,0.6406013711496603
+93e6u91i,Log-relative transfer,3,score_priority_lift_q80_normalized,contemporaneous,149,0.038292035215989166,0.6429003232500015
+93e6u91i,Log-relative transfer,3,score_priority_lift_q80_normalized,lead_1000,144,0.14829895478640323,0.07607973193873524
+f6qcecpq,Log-relative transfer,5,exact_unique_ratio,contemporaneous,150,-0.10575233990964603,0.1977542162591094
+f6qcecpq,Log-relative transfer,5,exact_unique_ratio,lead_1000,145,0.03886113636738458,0.6425938154661808
+f6qcecpq,Log-relative transfer,5,dominant_share,contemporaneous,150,0.09634832028415491,0.2408437079930985
+f6qcecpq,Log-relative transfer,5,dominant_share,lead_1000,145,-0.03210940865785412,0.7014225342655347
+f6qcecpq,Log-relative transfer,5,simpson_effective_size,contemporaneous,150,-0.0930346391880006,0.2574818996165122
+f6qcecpq,Log-relative transfer,5,simpson_effective_size,lead_1000,145,0.03150984768789616,0.7067397594636868
+f6qcecpq,Log-relative transfer,5,mean_pairwise_wall_distance_d4,contemporaneous,30,-0.13273875586323736,0.48439526776488684
+f6qcecpq,Log-relative transfer,5,mean_pairwise_wall_distance_d4,lead_1000,29,-0.21359850201390643,0.2658945050977446
+f6qcecpq,Log-relative transfer,5,mean_shortest_path,contemporaneous,30,0.3049531696859765,0.10129183905218535
+f6qcecpq,Log-relative transfer,5,mean_shortest_path,lead_1000,29,-0.13994403200625194,0.4690370594053949
+f6qcecpq,Log-relative transfer,5,mean_solvable,contemporaneous,30,,
+f6qcecpq,Log-relative transfer,5,mean_solvable,lead_1000,29,,
+f6qcecpq,Log-relative transfer,5,score_priority_lift_q80_normalized,contemporaneous,149,0.03327581402387959,0.6870410078058425
+f6qcecpq,Log-relative transfer,5,score_priority_lift_q80_normalized,lead_1000,144,0.04534673409859905,0.5894067190670923
+izkk5mlt,Log-relative transfer,0,exact_unique_ratio,contemporaneous,150,0.07621012605366813,0.35396788697394244
+izkk5mlt,Log-relative transfer,0,exact_unique_ratio,lead_1000,145,-0.04297491388590565,0.607780078054393
+izkk5mlt,Log-relative transfer,0,dominant_share,contemporaneous,150,-0.12147608612685129,0.13865564691569573
+izkk5mlt,Log-relative transfer,0,dominant_share,lead_1000,145,-0.018097521973618382,0.8289452072610674
+izkk5mlt,Log-relative transfer,0,simpson_effective_size,contemporaneous,150,0.11481241055303447,0.16180494460691683
+izkk5mlt,Log-relative transfer,0,simpson_effective_size,lead_1000,145,0.003528526755620212,0.966401863453476
+izkk5mlt,Log-relative transfer,0,mean_pairwise_wall_distance_d4,contemporaneous,30,0.13526481287143427,0.47604340673874135
+izkk5mlt,Log-relative transfer,0,mean_pairwise_wall_distance_d4,lead_1000,29,-0.1786554571002071,0.35379178041063186
+izkk5mlt,Log-relative transfer,0,mean_shortest_path,contemporaneous,30,-0.04536339322780614,0.8118576809952096
+izkk5mlt,Log-relative transfer,0,mean_shortest_path,lead_1000,29,-0.2415455623972887,0.2068274708015368
+izkk5mlt,Log-relative transfer,0,mean_solvable,contemporaneous,30,-0.1934105360831728,0.30581170943861796
+izkk5mlt,Log-relative transfer,0,mean_solvable,lead_1000,29,-0.2715544751071741,0.15416319662846406
+izkk5mlt,Log-relative transfer,0,score_priority_lift_q80_normalized,contemporaneous,149,0.018757998197242505,0.820375394415116
+izkk5mlt,Log-relative transfer,0,score_priority_lift_q80_normalized,lead_1000,144,-0.10698255570555945,0.20186077617641685
+k3t9umt7,Editor transfer,0,exact_unique_ratio,contemporaneous,150,0.01713988928141382,0.8350891038637511
+k3t9umt7,Editor transfer,0,exact_unique_ratio,lead_1000,145,-0.08670248266224326,0.29975725025006844
+k3t9umt7,Editor transfer,0,dominant_share,contemporaneous,150,0.053061109352311266,0.5190040928039636
+k3t9umt7,Editor transfer,0,dominant_share,lead_1000,145,0.12192913354886345,0.14402355353591587
+k3t9umt7,Editor transfer,0,simpson_effective_size,contemporaneous,150,-0.03508139661294063,0.6699660836978486
+k3t9umt7,Editor transfer,0,simpson_effective_size,lead_1000,145,-0.11565185456636977,0.16598146200934752
+k3t9umt7,Editor transfer,0,mean_pairwise_wall_distance_d4,contemporaneous,30,0.05632863783026623,0.7674976081073183
+k3t9umt7,Editor transfer,0,mean_pairwise_wall_distance_d4,lead_1000,29,-0.13926550516945568,0.4712163828319914
+k3t9umt7,Editor transfer,0,mean_shortest_path,contemporaneous,30,-0.4804053621394239,0.007210411053610835
+k3t9umt7,Editor transfer,0,mean_shortest_path,lead_1000,29,-0.3450019144037096,0.06681651493695155
+k3t9umt7,Editor transfer,0,mean_solvable,contemporaneous,30,0.05407832505395957,0.7765476676922725
+k3t9umt7,Editor transfer,0,mean_solvable,lead_1000,29,0.024415549540512824,0.899956175578005
+k3t9umt7,Editor transfer,0,score_priority_lift_q80_normalized,contemporaneous,149,-0.06280483776218869,0.4467013057152358
+k3t9umt7,Editor transfer,0,score_priority_lift_q80_normalized,lead_1000,144,0.03401996289090249,0.6856254192160155
+lwbqnaep,Mean absolute advantage,0,exact_unique_ratio,contemporaneous,150,-0.05012098913353206,0.5424567810133956
+lwbqnaep,Mean absolute advantage,0,exact_unique_ratio,lead_1000,145,0.039631485389357866,0.6360120999034641
+lwbqnaep,Mean absolute advantage,0,dominant_share,contemporaneous,150,0.0011630332976039683,0.9887302268652477
+lwbqnaep,Mean absolute advantage,0,dominant_share,lead_1000,145,-0.03662046209122122,0.6618946118286543
+lwbqnaep,Mean absolute advantage,0,simpson_effective_size,contemporaneous,150,-0.022467762311086235,0.7849260321196098
+lwbqnaep,Mean absolute advantage,0,simpson_effective_size,lead_1000,145,0.03908301579525058,0.6406952417379507
+lwbqnaep,Mean absolute advantage,0,mean_pairwise_wall_distance_d4,contemporaneous,30,-0.10540404693276507,0.5793472051783342
+lwbqnaep,Mean absolute advantage,0,mean_pairwise_wall_distance_d4,lead_1000,29,-0.1561808398961375,0.4184884596993253
+lwbqnaep,Mean absolute advantage,0,mean_shortest_path,contemporaneous,30,-0.07778034871806337,0.6828786412702699
+lwbqnaep,Mean absolute advantage,0,mean_shortest_path,lead_1000,29,-0.14756342238711015,0.4449297776464553
+lwbqnaep,Mean absolute advantage,0,mean_solvable,contemporaneous,30,,
+lwbqnaep,Mean absolute advantage,0,mean_solvable,lead_1000,29,,
+lwbqnaep,Mean absolute advantage,0,score_priority_lift_q80_normalized,contemporaneous,0,,
+lwbqnaep,Mean absolute advantage,0,score_priority_lift_q80_normalized,lead_1000,0,,
+p7ua9nbk,Mean positive delight,1,exact_unique_ratio,contemporaneous,150,-0.07997144627721404,0.3306468420389697
+p7ua9nbk,Mean positive delight,1,exact_unique_ratio,lead_1000,145,0.07067855691635141,0.3982373283138721
+p7ua9nbk,Mean positive delight,1,dominant_share,contemporaneous,150,0.10429634975519901,0.2040328211703878
+p7ua9nbk,Mean positive delight,1,dominant_share,lead_1000,145,-0.011141312122282147,0.8941916960982709
+p7ua9nbk,Mean positive delight,1,simpson_effective_size,contemporaneous,150,-0.09652255242886926,0.2399901163773365
+p7ua9nbk,Mean positive delight,1,simpson_effective_size,lead_1000,145,0.026180629823322803,0.7545985958242744
+p7ua9nbk,Mean positive delight,1,mean_pairwise_wall_distance_d4,contemporaneous,30,-0.015464340463175592,0.9353566627583733
+p7ua9nbk,Mean positive delight,1,mean_pairwise_wall_distance_d4,lead_1000,29,0.0677946776333079,0.7267674120290168
+p7ua9nbk,Mean positive delight,1,mean_shortest_path,contemporaneous,30,-0.19117510746505478,0.31154339318456803
+p7ua9nbk,Mean positive delight,1,mean_shortest_path,lead_1000,29,-0.15446259885684072,0.42368977795064516
+p7ua9nbk,Mean positive delight,1,mean_solvable,contemporaneous,30,,
+p7ua9nbk,Mean positive delight,1,mean_solvable,lead_1000,29,,
+p7ua9nbk,Mean positive delight,1,score_priority_lift_q80_normalized,contemporaneous,0,,
+p7ua9nbk,Mean positive delight,1,score_priority_lift_q80_normalized,lead_1000,0,,
+pqct4lrv,MaxMC,3,exact_unique_ratio,contemporaneous,150,-0.0420274657458074,0.6095968590356013
+pqct4lrv,MaxMC,3,exact_unique_ratio,lead_1000,145,-0.028526376290805462,0.7334052220422167
+pqct4lrv,MaxMC,3,dominant_share,contemporaneous,150,0.08524431527611603,0.2996515791080828
+pqct4lrv,MaxMC,3,dominant_share,lead_1000,145,0.05060262804375891,0.54554456148066
+pqct4lrv,MaxMC,3,simpson_effective_size,contemporaneous,150,-0.07852877171488933,0.3394727814013385
+pqct4lrv,MaxMC,3,simpson_effective_size,lead_1000,145,-0.05175893650832315,0.5363905225824285
+pqct4lrv,MaxMC,3,mean_pairwise_wall_distance_d4,contemporaneous,30,-0.03294746950270498,0.8627777304727411
+pqct4lrv,MaxMC,3,mean_pairwise_wall_distance_d4,lead_1000,29,0.03524772962695959,0.8559582531104655
+pqct4lrv,MaxMC,3,mean_shortest_path,contemporaneous,30,-0.2537845623857005,0.17597640343005883
+pqct4lrv,MaxMC,3,mean_shortest_path,lead_1000,29,-0.2181415434955191,0.25561695415090646
+pqct4lrv,MaxMC,3,mean_solvable,contemporaneous,30,-0.2576220724399079,0.16930944949393353
+pqct4lrv,MaxMC,3,mean_solvable,lead_1000,29,-0.3164616911623896,0.09441890534494132
+pqct4lrv,MaxMC,3,score_priority_lift_q80_normalized,contemporaneous,149,0.06870887212461774,0.40505915423829497
+pqct4lrv,MaxMC,3,score_priority_lift_q80_normalized,lead_1000,144,-0.02282513116571898,0.7859682121581495
+qoy8wlvi,MaxMC,0,exact_unique_ratio,contemporaneous,150,0.02891343715683232,0.725418095097971
+qoy8wlvi,MaxMC,0,exact_unique_ratio,lead_1000,145,-0.1293852539856554,0.12089037505171357
+qoy8wlvi,MaxMC,0,dominant_share,contemporaneous,150,-0.018141199439913772,0.825604130804016
+qoy8wlvi,MaxMC,0,dominant_share,lead_1000,145,0.1114981124168163,0.1818234035399967
+qoy8wlvi,MaxMC,0,simpson_effective_size,contemporaneous,150,0.018800170868657245,0.8193756116308647
+qoy8wlvi,MaxMC,0,simpson_effective_size,lead_1000,145,-0.11393915947198843,0.17238429445571354
+qoy8wlvi,MaxMC,0,mean_pairwise_wall_distance_d4,contemporaneous,30,0.08103296553367982,0.6703426431970253
+qoy8wlvi,MaxMC,0,mean_pairwise_wall_distance_d4,lead_1000,29,0.14123740612760727,0.46489755089550033
+qoy8wlvi,MaxMC,0,mean_shortest_path,contemporaneous,30,0.04341534681211304,0.8198028705216641
+qoy8wlvi,MaxMC,0,mean_shortest_path,lead_1000,29,-0.1360779255097161,0.48152451461167195
+qoy8wlvi,MaxMC,0,mean_solvable,contemporaneous,30,,
+qoy8wlvi,MaxMC,0,mean_solvable,lead_1000,29,,
+qoy8wlvi,MaxMC,0,score_priority_lift_q80_normalized,contemporaneous,0,,
+qoy8wlvi,MaxMC,0,score_priority_lift_q80_normalized,lead_1000,0,,
+rpm21nrq,Mean positive delight,0,exact_unique_ratio,contemporaneous,150,-0.13521607611820766,0.09898711055592581
+rpm21nrq,Mean positive delight,0,exact_unique_ratio,lead_1000,145,-0.08204813405977306,0.32654610876259255
+rpm21nrq,Mean positive delight,0,dominant_share,contemporaneous,150,0.13201736399067962,0.1073091021699789
+rpm21nrq,Mean positive delight,0,dominant_share,lead_1000,145,0.0698694180663185,0.40367349799433594
+rpm21nrq,Mean positive delight,0,simpson_effective_size,contemporaneous,150,-0.136291673555396,0.09630625037797196
+rpm21nrq,Mean positive delight,0,simpson_effective_size,lead_1000,145,-0.07895293207984498,0.3451874205478087
+rpm21nrq,Mean positive delight,0,mean_pairwise_wall_distance_d4,contemporaneous,30,-0.022324053724123643,0.906786651690119
+rpm21nrq,Mean positive delight,0,mean_pairwise_wall_distance_d4,lead_1000,29,0.17912376960150822,0.3525107161011368
+rpm21nrq,Mean positive delight,0,mean_shortest_path,contemporaneous,30,-0.1345473301796714,0.4784079918304878
+rpm21nrq,Mean positive delight,0,mean_shortest_path,lead_1000,29,0.10343587411854309,0.5933738638039657
+rpm21nrq,Mean positive delight,0,mean_solvable,contemporaneous,30,,
+rpm21nrq,Mean positive delight,0,mean_solvable,lead_1000,29,,
+rpm21nrq,Mean positive delight,0,score_priority_lift_q80_normalized,contemporaneous,0,,
+rpm21nrq,Mean positive delight,0,score_priority_lift_q80_normalized,lead_1000,0,,
+sie0pv6z,Log-relative transfer,4,exact_unique_ratio,contemporaneous,150,0.11853381051631054,0.14854479337685875
+sie0pv6z,Log-relative transfer,4,exact_unique_ratio,lead_1000,145,0.06199786386665303,0.45881185609751546
+sie0pv6z,Log-relative transfer,4,dominant_share,contemporaneous,150,-0.09007681152991222,0.27298584204465687
+sie0pv6z,Log-relative transfer,4,dominant_share,lead_1000,145,-0.04558822308594133,0.5861064838842235
+sie0pv6z,Log-relative transfer,4,simpson_effective_size,contemporaneous,150,0.0946051550738558,0.2495003651232277
+sie0pv6z,Log-relative transfer,4,simpson_effective_size,lead_1000,145,0.051787362989826384,0.5361664482589161
+sie0pv6z,Log-relative transfer,4,mean_pairwise_wall_distance_d4,contemporaneous,30,0.19109743862812595,0.31174373315571097
+sie0pv6z,Log-relative transfer,4,mean_pairwise_wall_distance_d4,lead_1000,29,-0.09388311894309265,0.6280953269278172
+sie0pv6z,Log-relative transfer,4,mean_shortest_path,contemporaneous,30,-0.36052953610735716,0.05032602574331088
+sie0pv6z,Log-relative transfer,4,mean_shortest_path,lead_1000,29,-0.27028786067663874,0.15616956406933855
+sie0pv6z,Log-relative transfer,4,mean_solvable,contemporaneous,30,0.04658699625769469,0.8068764598528501
+sie0pv6z,Log-relative transfer,4,mean_solvable,lead_1000,29,-0.04907379987576672,0.8004242390957738
+sie0pv6z,Log-relative transfer,4,score_priority_lift_q80_normalized,contemporaneous,149,0.14234867763864298,0.08331209714032672
+sie0pv6z,Log-relative transfer,4,score_priority_lift_q80_normalized,lead_1000,144,0.07249520719621379,0.3878640026424968
+v9bj04bs,Editor transfer,2,exact_unique_ratio,contemporaneous,150,-0.07868850188318989,0.3384882932585973
+v9bj04bs,Editor transfer,2,exact_unique_ratio,lead_1000,145,-0.057095363905895306,0.49515964220175945
+v9bj04bs,Editor transfer,2,dominant_share,contemporaneous,150,0.07060466224654703,0.390580409808422
+v9bj04bs,Editor transfer,2,dominant_share,lead_1000,145,0.025949330103092864,0.7566985777318312
+v9bj04bs,Editor transfer,2,simpson_effective_size,contemporaneous,150,-0.07489187325079544,0.3623790237970099
+v9bj04bs,Editor transfer,2,simpson_effective_size,lead_1000,145,-0.026737150814379298,0.7495532900050019
+v9bj04bs,Editor transfer,2,mean_pairwise_wall_distance_d4,contemporaneous,30,-0.09088892057177865,0.632894555698592
+v9bj04bs,Editor transfer,2,mean_pairwise_wall_distance_d4,lead_1000,29,0.11243996565621442,0.5614293864509555
+v9bj04bs,Editor transfer,2,mean_shortest_path,contemporaneous,30,-0.15051257112488733,0.4272537740157407
+v9bj04bs,Editor transfer,2,mean_shortest_path,lead_1000,29,-0.0011098783269594408,0.9954409457720551
+v9bj04bs,Editor transfer,2,mean_solvable,contemporaneous,30,,
+v9bj04bs,Editor transfer,2,mean_solvable,lead_1000,29,,
+v9bj04bs,Editor transfer,2,score_priority_lift_q80_normalized,contemporaneous,148,0.05149696612117252,0.5342126109927285
+v9bj04bs,Editor transfer,2,score_priority_lift_q80_normalized,lead_1000,143,0.07841768389348215,0.35188279813047996
+wayrdv2d,Mean positive delight,2,exact_unique_ratio,contemporaneous,150,0.08546679910807957,0.2983873895882461
+wayrdv2d,Mean positive delight,2,exact_unique_ratio,lead_1000,145,0.04290450412721811,0.6083688891294793
+wayrdv2d,Mean positive delight,2,dominant_share,contemporaneous,150,-0.05227026202123867,0.5252611715606097
+wayrdv2d,Mean positive delight,2,dominant_share,lead_1000,145,-0.0833502609706892,0.3189010129001325
+wayrdv2d,Mean positive delight,2,simpson_effective_size,contemporaneous,150,0.0633593361314973,0.4411379301153005
+wayrdv2d,Mean positive delight,2,simpson_effective_size,lead_1000,145,0.07286436536670915,0.3837718288972352
+wayrdv2d,Mean positive delight,2,mean_pairwise_wall_distance_d4,contemporaneous,30,-0.07593581170773893,0.6900248966746797
+wayrdv2d,Mean positive delight,2,mean_pairwise_wall_distance_d4,lead_1000,29,0.27981887808736694,0.14152386549615642
+wayrdv2d,Mean positive delight,2,mean_shortest_path,contemporaneous,30,0.12500079862700045,0.5104389036872152
+wayrdv2d,Mean positive delight,2,mean_shortest_path,lead_1000,29,0.449804500187506,0.014357928870863812
+wayrdv2d,Mean positive delight,2,mean_solvable,contemporaneous,30,,
+wayrdv2d,Mean positive delight,2,mean_solvable,lead_1000,29,,
+wayrdv2d,Mean positive delight,2,score_priority_lift_q80_normalized,contemporaneous,0,,
+wayrdv2d,Mean positive delight,2,score_priority_lift_q80_normalized,lead_1000,0,,
+y09ey343,MaxMC,4,exact_unique_ratio,contemporaneous,150,0.030264333691592784,0.7131384291364996
+y09ey343,MaxMC,4,exact_unique_ratio,lead_1000,145,0.2633785634563514,0.0013706767419403802
+y09ey343,MaxMC,4,dominant_share,contemporaneous,150,-0.06547747012965652,0.42598658164600456
+y09ey343,MaxMC,4,dominant_share,lead_1000,145,-0.2071167347826545,0.012433521095552123
+y09ey343,MaxMC,4,simpson_effective_size,contemporaneous,150,0.05386333703757179,0.5126961319893567
+y09ey343,MaxMC,4,simpson_effective_size,lead_1000,145,0.22327067409503637,0.006945849026491088
+y09ey343,MaxMC,4,mean_pairwise_wall_distance_d4,contemporaneous,30,0.28857492669391027,0.12197410865464511
+y09ey343,MaxMC,4,mean_pairwise_wall_distance_d4,lead_1000,29,0.20815371509039604,0.2785606594112851
+y09ey343,MaxMC,4,mean_shortest_path,contemporaneous,30,-0.05829995549621719,0.7595940886918848
+y09ey343,MaxMC,4,mean_shortest_path,lead_1000,29,-0.07809805370780981,0.6871783920499925
+y09ey343,MaxMC,4,mean_solvable,contemporaneous,30,-0.12352505747631914,0.5154831110913073
+y09ey343,MaxMC,4,mean_solvable,lead_1000,29,-0.37414110729222205,0.04555710379383421
+y09ey343,MaxMC,4,score_priority_lift_q80_normalized,contemporaneous,149,0.10114241189407037,0.21968996682211675
+y09ey343,MaxMC,4,score_priority_lift_q80_normalized,lead_1000,144,0.08930676581194005,0.2871159871592671
